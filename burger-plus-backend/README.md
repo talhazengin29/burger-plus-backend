@@ -1,0 +1,114 @@
+# Burger Plus — Backend
+
+Çok-telefon + mutfak destekli gerçek zamanlı sipariş sunucusu.
+Node.js + Express + Socket.io + **PostgreSQL**.
+
+## Ne işe yarar?
+
+- Aynı masaya bağlanan **birden fazla telefonun** siparişini birleştirir.
+- Biri ürün eklediğinde **herkes anında görür** (Socket.io ile canlı).
+- **Mutfak ekranı** tüm masaları canlı görür, "hazır" durumunu yayar.
+- Veriler **PostgreSQL** veritabanında kalıcı — sunucu kapansa da kaybolmaz.
+
+## Kurulum
+
+### 1. PostgreSQL hazır olmalı
+Bilgisayarında PostgreSQL kurulu ve çalışıyor olmalı, `burger_plus` adında bir
+veritabanı oluşturulmuş olmalı:
+```sql
+CREATE DATABASE burger_plus;
+```
+
+### 2. Bağlantı bilgileri (.env)
+`.env` dosyasını aç ve `PGPASSWORD` satırına PostgreSQL kurulumunda
+belirlediğin şifreyi yaz:
+```
+PGHOST=localhost
+PGPORT=5432
+PGUSER=postgres
+PGPASSWORD=senin_sifren
+PGDATABASE=burger_plus
+PORT=4000
+```
+
+### 3. Çalıştır
+```bash
+npm install
+npm start        # http://localhost:4000
+```
+
+İlk açılışta tablolar (oturumlar, siparis_kalemleri) otomatik oluşturulur.
+
+Bağlantı hatası alırsan:
+- PostgreSQL servisi çalışıyor mu? (Windows Hizmetler'den kontrol et)
+- .env'deki şifre doğru mu?
+- burger_plus veritabanı oluşturuldu mu?
+
+## Mimari
+
+- Her masa bir **oturum**. Aynı masaya bağlanan herkes aynı oturuma düşer → siparişler birleşir.
+- Telefon `masaya-katil` ile masanın "odasına" girer; o odaya yayılan güncelleme ona ulaşır.
+- Mutfak `mutfaga-katil` ile tüm masaları dinler.
+
+## Socket olayları
+
+Müşteri: `masaya-katil`(masaNo), `urun-ekle`({masaNo,urun,kisiAdi}) · dinle: `masa-guncellendi`
+Mutfak: `mutfaga-katil`, `masa-durum-degistir`({masaNo,durum}) · dinle: `mutfak-guncellendi`
+
+## HTTP API
+- `GET /api/masa/:masaNo` → bir masanın siparişi
+- `GET /api/mutfak` → tüm açık masalar
+
+## Veritabanı tabloları
+- **oturumlar**: her aktif masa bir oturum (id, masa_no, durum)
+- **siparis_kalemleri**: kim ne ekledi (oturum_id, urun_ad, fiyat, adet, kisi_adi, durum, odendi)
+
+## Kullanıcı sistemi (auth)
+
+Gerçek kayıt/giriş sistemi eklendi:
+- Şifreler **bcrypt** ile hash'lenir (güvenli)
+- Oturum **JWT token** ile korunur (7 gün geçerli)
+- Kayıt alanları: ad, soyad, cinsiyet, e-posta, telefon, şifre
+
+### Birini admin yapma (QR üretme ekranını görmesi için)
+
+Normal kullanıcılar QR üretme (işletme) ekranını göremez. Bir kullanıcıyı
+admin yapmak için, Docker'daki PostgreSQL'e bağlanıp şu komutu çalıştır:
+
+```bash
+docker exec -it burgerplus-postgres psql -U burgerplus -d burgerplus
+```
+
+Sonra (kendi e-postanı yaz):
+```sql
+UPDATE kullanicilar SET rol='admin' WHERE email='senin@epostan.com';
+```
+
+Çıkmak için `\q`. Admin olan kullanıcı, uygulamada Profil ekranında
+"İşletme → Masa QR Kodları" bölümünü görür.
+
+## Auth API uçları
+- `POST /api/kayit` — kayıt (ad, soyad, cinsiyet, email, telefon, sifre)
+- `POST /api/giris` — giriş (email, sifre) → token döner
+- `GET /api/ben` — token ile güncel kullanıcı (Authorization: Bearer TOKEN)
+- `POST /api/puan` — puan güncelle (giriş yapmış kullanıcı)
+
+## Yayına çıkış (Supabase + Render)
+
+Bu backend hem yerel hem bulut ortamda çalışır:
+
+- **Yerel:** `.env` içinde `PGHOST/PGUSER/PGPASSWORD/PGDATABASE`
+- **Yayın:** Tek satır `DATABASE_URL` (Supabase'in verdiği adres)
+
+Detaylı adım adım rehber için `burger-plus-web` projesindeki
+**YAYINA-CIKIS-REHBERI.md** dosyasına bak.
+
+### Yerel kurulum notu
+
+Zip içinde `.env` yoktur (güvenlik). İlk kurulumda:
+
+```bash
+copy .env.example .env
+```
+
+sonra `.env` içindeki değerleri kendi Docker PostgreSQL ayarlarınla düzenle.
