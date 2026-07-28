@@ -115,22 +115,60 @@ export async function tablolariHazirla() {
     }
   }
 
+  // Eski sürüm aynı masaya ürünleri eşzamanlı eklerken birden fazla açık
+  // oturum oluşturabiliyordu. Kalemleri en yeni oturumda birleştir, eski
+  // oturumları kapat ve bunun tekrarını veritabanı seviyesinde engelle.
+  const migration = await pool.connect();
+  try {
+    await migration.query("BEGIN");
+    await migration.query(`
+      WITH acik_oturumlar AS (
+        SELECT id, masa_no, MAX(id) OVER (PARTITION BY masa_no) AS hedef_id
+        FROM oturumlar WHERE durum='acik'
+      )
+      UPDATE siparis_kalemleri k
+      SET oturum_id = a.hedef_id
+      FROM acik_oturumlar a
+      WHERE k.oturum_id = a.id AND a.id <> a.hedef_id
+    `);
+    await migration.query(`
+      WITH acik_oturumlar AS (
+        SELECT id, MAX(id) OVER (PARTITION BY masa_no) AS hedef_id
+        FROM oturumlar WHERE durum='acik'
+      )
+      UPDATE oturumlar o SET durum='kapali'
+      FROM acik_oturumlar a
+      WHERE o.id=a.id AND a.id <> a.hedef_id
+    `);
+    await migration.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS tek_acik_oturum_masa
+      ON oturumlar (masa_no) WHERE durum='acik'
+    `);
+    await migration.query("COMMIT");
+  } catch (e) {
+    await migration.query("ROLLBACK");
+    throw e;
+  } finally {
+    migration.release();
+  }
+
   console.log("Veritabanı tabloları hazır.");
 }
 
 // Açık bir masa oturumu bul; yoksa oluştur.
 export async function masaOturumuBulVeyaOlustur(masaNo) {
-  const mevcut = await pool.query(
-    "SELECT * FROM oturumlar WHERE masa_no = $1 AND durum = 'acik' ORDER BY id DESC LIMIT 1",
-    [masaNo]
-  );
-  if (mevcut.rows.length > 0) return mevcut.rows[0];
-
   const yeni = await pool.query(
-    "INSERT INTO oturumlar (masa_no) VALUES ($1) RETURNING *",
+    `INSERT INTO oturumlar (masa_no) VALUES ($1)
+     ON CONFLICT (masa_no) WHERE durum='acik' DO NOTHING
+     RETURNING *`,
     [masaNo]
   );
-  return yeni.rows[0];
+  if (yeni.rows.length) return yeni.rows[0];
+  const mevcut = await pool.query(
+    "SELECT * FROM oturumlar WHERE masa_no=$1 AND durum='acik' LIMIT 1",
+    [masaNo]
+  );
+  return mevcut.rows[0];
 }
 
 // Bir masanin tum siparis kalemlerini getir (birlesik hesap).
@@ -207,37 +245,11 @@ export async function kalemEkle(masaNo, urun, kisiAdi, gelenSecimler = {}, gelen
     } : {}),
   };
   const adet = urun.adet || 1;
-  const istemci = await pool.connect();
-  try {
-    await istemci.query("BEGIN");
-    await istemci.query(
-      `INSERT INTO siparis_kalemleri (oturum_id, urun_id, urun_ad, fiyat, adet, kisi_adi, secimler, siparis_no)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
-      [oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo]
-    );
-    const recete = await istemci.query(
-      "SELECT stok_id, miktar FROM urun_receteleri WHERE urun_id=$1",
-      [urun.id]
-    );
-    for (const kalem of recete.rows) {
-      const tuketim = Number(kalem.miktar) * adet;
-      await istemci.query(
-        "UPDATE stok_kalemleri SET mevcut=GREATEST(0,mevcut-$1),guncelleme=NOW() WHERE id=$2",
-        [tuketim, kalem.stok_id]
-      );
-      await istemci.query(
-        `INSERT INTO stok_hareketleri (stok_id,miktar,tip,aciklama)
-         VALUES ($1,$2,'satis',$3)`,
-        [kalem.stok_id, -tuketim, `Sipariş ${siparisNo || "—"}`]
-      );
-    }
-    await istemci.query("COMMIT");
-  } catch (e) {
-    await istemci.query("ROLLBACK");
-    throw e;
-  } finally {
-    istemci.release();
-  }
+  await pool.query(
+    `INSERT INTO siparis_kalemleri (oturum_id, urun_id, urun_ad, fiyat, adet, kisi_adi, secimler, siparis_no)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
+    [oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo]
+  );
   return masaSiparisleriniGetir(masaNo);
 }
 
@@ -259,14 +271,10 @@ export async function masaDurumGuncelle(masaNo, durum) {
 // Mutfak ekrani icin: tum acik masalarin (kalemi olan) siparisleri.
 export async function tumAcikMasalar() {
   const oturumlar = await pool.query(
-    "SELECT * FROM oturumlar WHERE durum = 'acik' ORDER BY id"
+    "SELECT DISTINCT masa_no FROM oturumlar WHERE durum='acik' ORDER BY masa_no"
   );
-  const sonuc = [];
-  for (const o of oturumlar.rows) {
-    const masa = await masaSiparisleriniGetir(o.masa_no);
-    if (masa.kalemler.length > 0) sonuc.push(masa);
-  }
-  return sonuc;
+  const sonuc = await Promise.all(oturumlar.rows.map((o) => masaSiparisleriniGetir(o.masa_no)));
+  return sonuc.filter((masa) => masa.kalemler.length > 0);
 }
 
 // Salon personeli: masayi kapatir (musteriler kalkinca).

@@ -27,12 +27,6 @@ import {
   urunleriGetir,
   urunKaydet,
   urunAktiflikDegistir,
-  stoklariGetir,
-  stokKalemiKaydet,
-  stokHareketiEkle,
-  stokHareketleriniGetir,
-  receteKaydet,
-  receteGetir,
   personelleriGetir,
   personelKaydet,
   vardiyaDegistir,
@@ -93,13 +87,6 @@ app.get("/api/masa/:masaNo", async (req, res) => {
 app.get("/api/mutfak", async (req, res) => {
   res.json(await tumAcikMasalar());
 });
-const mutfakStokOzeti = async () => (await stoklariGetir()).map(
-  ({ id, ad, kategori, birim, mevcut, kritik_seviye, kritik }) => ({ id, ad, kategori, birim, mevcut, kritik_seviye, kritik })
-);
-app.get("/api/mutfak/stok", async (_req, res) => {
-  res.json({ stoklar: await mutfakStokOzeti() });
-});
-
 // Aktif ürün kataloğu müşteri uygulamasına açıktır.
 app.get("/api/urunler", async (_req, res) => {
   res.json({ urunler: await urunleriGetir() });
@@ -147,19 +134,6 @@ app.patch("/api/admin/urunler/:id/aktif", admin, guvenli(async (req) => {
   await urunAktiflikDegistir(req.params.id, req.body.aktif);
   io.emit("urunler-guncellendi", await urunleriGetir());
 }));
-app.get("/api/admin/stok", admin, guvenli(async () => ({ stoklar: await stoklariGetir() })));
-app.get("/api/admin/stok/hareketler", admin, guvenli(async () => ({ hareketler: await stokHareketleriniGetir() })));
-app.post("/api/admin/stok", admin, guvenli(async (req) => {
-  const stok = await stokKalemiKaydet(req.body);
-  io.to("mutfak").emit("stok-guncellendi", await mutfakStokOzeti());
-  return { stok };
-}));
-app.post("/api/admin/stok/:id/hareket", admin, guvenli(async (req) => {
-  await stokHareketiEkle(req.params.id, req.body.miktar, req.body.tip, req.body.aciklama, req.kullanici.id);
-  io.to("mutfak").emit("stok-guncellendi", await mutfakStokOzeti());
-}));
-app.get("/api/admin/urunler/:id/recete", admin, guvenli(async (req) => ({ kalemler: await receteGetir(req.params.id) })));
-app.put("/api/admin/urunler/:id/recete", admin, guvenli((req) => receteKaydet(req.params.id, req.body.kalemler)));
 app.get("/api/admin/personeller", admin, guvenli(async () => ({ personeller: await personelleriGetir() })));
 app.post("/api/admin/personeller", admin, guvenli(async (req) => ({ personel: await personelKaydet(req.body) })));
 app.post("/api/admin/personeller/:id/vardiya", admin, guvenli((req) => vardiyaDegistir(req.params.id, req.body.islem)));
@@ -171,6 +145,22 @@ app.get("/", (req, res) => res.send("Burger Plus backend calisiyor (PostgreSQL)"
 app.get("/saglik", (req, res) => res.json({ durum: "calisiyor", zaman: new Date().toISOString() }));
 
 // --- Socket.io ---
+// Aynı masaya ait olayları sıraya al. Böylece çok ürünlü sipariş, durum
+// değiştirme ve masa kapatma olayları birbirini geçip eski ekran verisini
+// yeniden yayınlayamaz.
+const masaKuyruklari = new Map();
+function masaSirayaAl(masaNo, islem) {
+  const anahtar = String(masaNo);
+  const onceki = masaKuyruklari.get(anahtar) || Promise.resolve();
+  const sonraki = onceki.catch(() => {}).then(islem);
+  masaKuyruklari.set(anahtar, sonraki);
+  const temizle = () => {
+    if (masaKuyruklari.get(anahtar) === sonraki) masaKuyruklari.delete(anahtar);
+  };
+  sonraki.then(temizle, temizle);
+  return sonraki;
+}
+
 io.on("connection", (socket) => {
   console.log("Baglandi:", socket.id);
 
@@ -180,19 +170,21 @@ io.on("connection", (socket) => {
     console.log(`${socket.id} -> masa-${masaNo}`);
   });
 
-  socket.on("urun-ekle", async ({ masaNo, urun, kisiAdi, secimler, haricMalzemeler, siparisNo }) => {
-    const guncel = await kalemEkle(
-      masaNo,
-      urun,
-      kisiAdi,
-      secimler || urun?.secimler || {},
-      haricMalzemeler || urun?.haricMalzemeler || [],
-      siparisNo
-    );
-    io.to(`masa-${masaNo}`).emit("masa-guncellendi", guncel);
-    io.to("mutfak").emit("mutfak-guncellendi", await tumAcikMasalar());
-    io.to("salon").emit("salon-guncellendi", await tumAcikMasalar());
-    io.to("mutfak").emit("stok-guncellendi", await mutfakStokOzeti());
+  socket.on("urun-ekle", ({ masaNo, urun, kisiAdi, secimler, haricMalzemeler, siparisNo }, tamamlandi) => {
+    masaSirayaAl(masaNo, async () => {
+      const guncel = await kalemEkle(
+        masaNo, urun, kisiAdi, secimler || urun?.secimler || {},
+        haricMalzemeler || urun?.haricMalzemeler || [], siparisNo
+      );
+      io.to(`masa-${masaNo}`).emit("masa-guncellendi", guncel);
+      const tumMasalar = await tumAcikMasalar();
+      io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
+      io.to("salon").emit("salon-guncellendi", tumMasalar);
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
+    }).catch((e) => {
+      console.error("Ürün ekleme hatası:", e.message);
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: e.message });
+    });
   });
 
   socket.on("mutfaga-katil", async () => {
@@ -208,25 +200,37 @@ io.on("connection", (socket) => {
     console.log(`${socket.id} -> salon`);
   });
 
-  socket.on("masa-durum-degistir", async ({ masaNo, durum }) => {
-    const guncel = await masaDurumGuncelle(masaNo, durum);
-    if (guncel) {
-      io.to(`masa-${masaNo}`).emit("masa-guncellendi", guncel);
-      io.to("mutfak").emit("mutfak-guncellendi", await tumAcikMasalar());
-      io.to("salon").emit("salon-guncellendi", await tumAcikMasalar());
-    }
+  socket.on("masa-durum-degistir", ({ masaNo, durum }, tamamlandi) => {
+    masaSirayaAl(masaNo, async () => {
+      const guncel = await masaDurumGuncelle(masaNo, durum);
+      if (guncel) {
+        io.to(`masa-${masaNo}`).emit("masa-guncellendi", guncel);
+        const tumMasalar = await tumAcikMasalar();
+        io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
+        io.to("salon").emit("salon-guncellendi", tumMasalar);
+      }
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
+    }).catch((e) => {
+      console.error("Durum değiştirme hatası:", e.message);
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: e.message });
+    });
   });
 
   // Salon: masayi kapat (musteriler kalkinca). Oturum kapanir, yeni gelen temiz baslar.
-  socket.on("masa-kapat", async (masaNo) => {
-    const bos = await masaKapat(masaNo);
-    // Masadaki musterilere bos masa bildir (ekranlari temizlensin)
-    io.to(`masa-${masaNo}`).emit("masa-guncellendi", bos);
-    io.to(`masa-${masaNo}`).emit("masa-kapandi", { masaNo });
-    // Mutfak ve salon listelerini guncelle (masa listeden dussun)
-    io.to("mutfak").emit("mutfak-guncellendi", await tumAcikMasalar());
-    io.to("salon").emit("salon-guncellendi", await tumAcikMasalar());
-    console.log(`Masa ${masaNo} kapatildi`);
+  socket.on("masa-kapat", (masaNo, tamamlandi) => {
+    masaSirayaAl(masaNo, async () => {
+      const bos = await masaKapat(masaNo);
+      io.to(`masa-${masaNo}`).emit("masa-guncellendi", bos);
+      io.to(`masa-${masaNo}`).emit("masa-kapandi", { masaNo });
+      const tumMasalar = await tumAcikMasalar();
+      io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
+      io.to("salon").emit("salon-guncellendi", tumMasalar);
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
+      console.log(`Masa ${masaNo} kapatildi`);
+    }).catch((e) => {
+      console.error("Masa kapatma hatası:", e.message);
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: e.message });
+    });
   });
 
   socket.on("disconnect", () => console.log("Ayrildi:", socket.id));
