@@ -104,3 +104,19 @@ export function korumaliMiddleware() {
     next();
   };
 }
+
+// Yönetim uçları yalnızca rolü admin olan gerçek kullanıcı hesabına açıktır.
+export function adminMiddleware() {
+  return async (req, res, next) => {
+    const baslik = req.headers.authorization || "";
+    const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
+    if (!token) return res.status(401).json({ hata: "Yönetici girişi gerekli." });
+
+    const kullanici = await tokenDogrula(token);
+    if (!kullanici || kullanici.rol !== "admin") {
+      return res.status(403).json({ hata: "Bu işlem için yönetici yetkisi gerekli." });
+    }
+    req.kullanici = kullanici;
+    next();
+  };
+}

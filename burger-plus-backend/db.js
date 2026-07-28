@@ -58,8 +58,15 @@ export async function tablolariHazirla() {
       kisi_adi TEXT,
       durum TEXT NOT NULL DEFAULT 'yeni',
       odendi BOOLEAN NOT NULL DEFAULT false,
+      secimler JSONB NOT NULL DEFAULT '{}'::jsonb,
       olusturma TIMESTAMPTZ DEFAULT NOW()
     )
+  `);
+
+  // Migration: eski kurulumlarda ürün özelleştirmelerini güvenli JSON olarak sakla.
+  await pool.query(`
+    ALTER TABLE siparis_kalemleri
+    ADD COLUMN IF NOT EXISTS secimler JSONB NOT NULL DEFAULT '{}'::jsonb
   `);
 
   // Kullanıcılar tablosu. rol='kullanici' varsayılan; admin elle işaretlenir:
@@ -145,6 +152,8 @@ export async function masaSiparisleriniGetir(masaNo) {
   const kalemlerNumerik = kalemler.rows.map((k) => ({
     ...k,
     fiyat: Number(k.fiyat),
+    secimler: k.secimler || {},
+    haricMalzemeler: k.secimler?.haricMalzemeler || [],
   }));
   const toplam = kalemlerNumerik.reduce(
     (t, k) => t + k.fiyat * k.adet,
@@ -154,13 +163,81 @@ export async function masaSiparisleriniGetir(masaNo) {
 }
 
 // Masaya yeni kalem ekle.
-export async function kalemEkle(masaNo, urun, kisiAdi) {
+export async function kalemEkle(masaNo, urun, kisiAdi, gelenSecimler = {}, gelenHaricMalzemeler = [], siparisNo = null) {
   const oturum = await masaOturumuBulVeyaOlustur(masaNo);
-  await pool.query(
-    `INSERT INTO siparis_kalemleri (oturum_id, urun_id, urun_ad, fiyat, adet, kisi_adi)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [oturum.id, urun.id, urun.ad, urun.fiyat, urun.adet || 1, kisiAdi || "Misafir"]
+  const haricAdaylari = Array.isArray(gelenHaricMalzemeler)
+    ? gelenHaricMalzemeler
+    : Array.isArray(urun.haricMalzemeler) ? urun.haricMalzemeler : [];
+  const haricMalzemeler = haricAdaylari
+    .filter((malzeme) => typeof malzeme === "string")
+    .slice(0, 50)
+    .map((malzeme) => malzeme.slice(0, 100));
+  let guvenliSecimler = {};
+  if (gelenSecimler && typeof gelenSecimler === "object" && !Array.isArray(gelenSecimler)) {
+    try {
+      const json = JSON.stringify(gelenSecimler);
+      if (Buffer.byteLength(json, "utf8") <= 10_000) guvenliSecimler = JSON.parse(json);
+    } catch {
+      guvenliSecimler = {};
+    }
+  }
+  // Eski istemciler eksik seçim gönderirse ürün kataloğundan tamamla.
+  const urunMetaSonuc = await pool.query(
+    "SELECT kategori, malzemeler, temel_miktar FROM urunler WHERE id=$1 LIMIT 1",
+    [urun.id]
   );
+  const urunMeta = urunMetaSonuc.rows[0] || {};
+  const tumMalzemeler = Array.isArray(urun.malzemeler)
+    ? urun.malzemeler
+    : Array.isArray(urunMeta.malzemeler) ? urunMeta.malzemeler : [];
+  const standartGramaj = Number(guvenliSecimler.standartGramaj || urun.temelMiktar || urunMeta.temel_miktar || 0);
+  const ekstraGramaj = Number(guvenliSecimler.ekstraGramaj || 0);
+  const secimler = {
+    ...guvenliSecimler,
+    haricMalzemeler,
+    dahilMalzemeler: Array.isArray(guvenliSecimler.dahilMalzemeler)
+      ? guvenliSecimler.dahilMalzemeler
+      : tumMalzemeler.filter((m) => !haricMalzemeler.includes(m)),
+    ...(standartGramaj > 0 ? {
+      standartGramaj,
+      ekstraGramaj,
+      toplamGramaj: Number(guvenliSecimler.toplamGramaj || standartGramaj + ekstraGramaj),
+      gramajBirim: guvenliSecimler.gramajBirim || (urunMeta.kategori === "İçecekler" ? "ml" : "gr"),
+      gramajEtiketi: guvenliSecimler.gramajEtiketi || "Ürün miktarı",
+    } : {}),
+  };
+  const adet = urun.adet || 1;
+  const istemci = await pool.connect();
+  try {
+    await istemci.query("BEGIN");
+    await istemci.query(
+      `INSERT INTO siparis_kalemleri (oturum_id, urun_id, urun_ad, fiyat, adet, kisi_adi, secimler, siparis_no)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
+      [oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo]
+    );
+    const recete = await istemci.query(
+      "SELECT stok_id, miktar FROM urun_receteleri WHERE urun_id=$1",
+      [urun.id]
+    );
+    for (const kalem of recete.rows) {
+      const tuketim = Number(kalem.miktar) * adet;
+      await istemci.query(
+        "UPDATE stok_kalemleri SET mevcut=GREATEST(0,mevcut-$1),guncelleme=NOW() WHERE id=$2",
+        [tuketim, kalem.stok_id]
+      );
+      await istemci.query(
+        `INSERT INTO stok_hareketleri (stok_id,miktar,tip,aciklama)
+         VALUES ($1,$2,'satis',$3)`,
+        [kalem.stok_id, -tuketim, `Sipariş ${siparisNo || "—"}`]
+      );
+    }
+    await istemci.query("COMMIT");
+  } catch (e) {
+    await istemci.query("ROLLBACK");
+    throw e;
+  } finally {
+    istemci.release();
+  }
   return masaSiparisleriniGetir(masaNo);
 }
 
