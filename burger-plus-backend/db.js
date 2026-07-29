@@ -8,10 +8,22 @@
 
 import pkg from "pg";
 import dotenv from "dotenv";
-import { randomUUID } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 
 dotenv.config();
 const { Pool } = pkg;
+
+const DAVET_KODU_KARAKTERLERI = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function davetKoduUret() {
+  const rastgele = randomBytes(8);
+  return Array.from(rastgele, (deger) => DAVET_KODU_KARAKTERLERI[deger % DAVET_KODU_KARAKTERLERI.length]).join("");
+}
+
+export function davetPuaniHesapla(tutar) {
+  const sayi = Number(tutar);
+  return Number.isFinite(sayi) && sayi > 0 ? Math.floor(sayi * 0.05) : 0;
+}
 
 // Bağlantı havuzu: birden çok istek aynı anda gelince verimli yönetir.
 //
@@ -94,6 +106,44 @@ export async function tablolariHazirla() {
     )
   `);
 
+  // Davet sistemi migration'ı: her hesap kalıcı ve benzersiz bir kod taşır;
+  // davetçi ilişkisi kayıt anında bir kez yazılır ve sonradan değiştirilmez.
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS davet_kodu VARCHAR(8)");
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS davet_eden_id INTEGER");
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='kullanicilar_davet_eden_id_fkey') THEN
+        ALTER TABLE kullanicilar ADD CONSTRAINT kullanicilar_davet_eden_id_fkey
+          FOREIGN KEY (davet_eden_id) REFERENCES kullanicilar(id) ON DELETE SET NULL;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='kullanicilar_davet_eden_farkli') THEN
+        ALTER TABLE kullanicilar ADD CONSTRAINT kullanicilar_davet_eden_farkli
+          CHECK (davet_eden_id IS NULL OR davet_eden_id <> id);
+      END IF;
+    END $$
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS kullanicilar_davet_kodu_unique
+    ON kullanicilar (davet_kodu) WHERE davet_kodu IS NOT NULL
+  `);
+  const kodsuzKullanicilar = await pool.query("SELECT id FROM kullanicilar WHERE davet_kodu IS NULL ORDER BY id");
+  for (const kullanici of kodsuzKullanicilar.rows) {
+    let atandi = false;
+    for (let deneme = 0; deneme < 20 && !atandi; deneme += 1) {
+      try {
+        const sonuc = await pool.query(
+          "UPDATE kullanicilar SET davet_kodu=$1 WHERE id=$2 AND davet_kodu IS NULL",
+          [davetKoduUret(), kullanici.id]
+        );
+        atandi = sonuc.rowCount === 1 || sonuc.rowCount === 0;
+      } catch (e) {
+        if (e.code !== "23505") throw e;
+      }
+    }
+    if (!atandi) throw new Error(`Kullanıcı ${kullanici.id} için benzersiz davet kodu üretilemedi.`);
+  }
+  await pool.query("ALTER TABLE kullanicilar ALTER COLUMN davet_kodu SET NOT NULL");
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS kullanici_siparisleri (
       id BIGSERIAL PRIMARY KEY,
@@ -137,6 +187,41 @@ export async function tablolariHazirla() {
     );
     CREATE INDEX IF NOT EXISTS odeme_islemleri_kullanici_idx
       ON odeme_islemleri (kullanici_id, olusturma DESC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS davet_odulleri (
+      id BIGSERIAL PRIMARY KEY,
+      davet_eden_id INTEGER NOT NULL REFERENCES kullanicilar(id) ON DELETE CASCADE,
+      davet_edilen_id INTEGER NOT NULL REFERENCES kullanicilar(id) ON DELETE CASCADE,
+      odeme_id UUID NOT NULL REFERENCES odeme_islemleri(id) ON DELETE RESTRICT,
+      siparis_tutari NUMERIC NOT NULL CHECK (siparis_tutari >= 0),
+      oran NUMERIC NOT NULL DEFAULT 0.05 CHECK (oran >= 0 AND oran <= 1),
+      puan INTEGER NOT NULL CHECK (puan >= 0),
+      durum TEXT NOT NULL DEFAULT 'kazanildi' CHECK (durum IN ('kazanildi','geri_alindi')),
+      olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      geri_alinma TIMESTAMPTZ,
+      UNIQUE (odeme_id),
+      CHECK (davet_eden_id <> davet_edilen_id)
+    );
+    CREATE INDEX IF NOT EXISTS davet_odulleri_davet_eden_idx
+      ON davet_odulleri (davet_eden_id, olusturma DESC);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS puan_hareketleri (
+      id BIGSERIAL PRIMARY KEY,
+      kullanici_id INTEGER NOT NULL REFERENCES kullanicilar(id) ON DELETE CASCADE,
+      tur TEXT NOT NULL,
+      puan INTEGER NOT NULL,
+      aciklama TEXT NOT NULL,
+      odeme_id UUID REFERENCES odeme_islemleri(id) ON DELETE SET NULL,
+      kaynak_kullanici_id INTEGER REFERENCES kullanicilar(id) ON DELETE SET NULL,
+      olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS puan_hareketleri_odeme_unique
+      ON puan_hareketleri (kullanici_id, tur, odeme_id)
+      WHERE odeme_id IS NOT NULL;
   `);
 
   // --- Migration: mevcut tablolarda olusturma sütununu TIMESTAMPTZ'ye çevir ---
@@ -433,9 +518,16 @@ async function odemeBasariliOlarakIsle(id, saglayici, saglayiciToken, kullaniciI
           [odeme.kazanilan_puan, odeme.kullanici_id]
         );
         guncelPuan = Number(puanSonuc.rows[0]?.puan);
+        await baglanti.query(
+          `INSERT INTO puan_hareketleri (kullanici_id,tur,puan,aciklama,odeme_id)
+           VALUES ($1,'siparis_kazanci',$2,'Sipariş puanı',$3)
+           ON CONFLICT (kullanici_id,tur,odeme_id) WHERE odeme_id IS NOT NULL DO NOTHING`,
+          [odeme.kullanici_id, odeme.kazanilan_puan, odeme.id]
+        );
       }
+      const davetOdulu = await davetOdulunuUygula(baglanti, odeme);
       await baglanti.query("COMMIT");
-      return { odeme: { ...odemeDonustur(odeme), guncelPuan }, ilkOnay: true };
+      return { odeme: { ...odemeDonustur(odeme), guncelPuan, davetOdulu }, ilkOnay: true };
     }
     await baglanti.query("COMMIT");
   } catch (e) {
@@ -453,6 +545,73 @@ async function odemeBasariliOlarakIsle(id, saglayici, saglayiciToken, kullaniciI
   const odeme = odemeDonustur(mevcut.rows[0]);
   if (odeme.durum !== "basarili") throw new Error("Ödeme taslağının süresi dolmuş veya işlem tamamlanamamış.");
   return { odeme, ilkOnay: false };
+}
+
+async function davetOdulunuUygula(baglanti, odeme) {
+  if (!odeme.kullanici_id) return null;
+  const puan = davetPuaniHesapla(odeme.tutar);
+  if (puan < 1) return null;
+
+  const eklenen = await baglanti.query(
+    `INSERT INTO davet_odulleri
+      (davet_eden_id,davet_edilen_id,odeme_id,siparis_tutari,oran,puan)
+     SELECT davet_eden_id,id,$2,$3,0.05,$4
+     FROM kullanicilar
+     WHERE id=$1 AND davet_eden_id IS NOT NULL AND davet_eden_id <> id
+     ON CONFLICT (odeme_id) DO NOTHING
+     RETURNING davet_eden_id,davet_edilen_id,puan`,
+    [odeme.kullanici_id, odeme.id, odeme.tutar, puan]
+  );
+  if (!eklenen.rows.length) return null;
+
+  const odul = eklenen.rows[0];
+  await baglanti.query("UPDATE kullanicilar SET puan=puan+$1 WHERE id=$2", [odul.puan, odul.davet_eden_id]);
+  await baglanti.query(
+    `INSERT INTO puan_hareketleri
+      (kullanici_id,tur,puan,aciklama,odeme_id,kaynak_kullanici_id)
+     VALUES ($1,'davet_kazanci',$2,'Davet edilen kullanıcının siparişinden %5 ödül',$3,$4)
+     ON CONFLICT (kullanici_id,tur,odeme_id) WHERE odeme_id IS NOT NULL DO NOTHING`,
+    [odul.davet_eden_id, odul.puan, odeme.id, odul.davet_edilen_id]
+  );
+  return { kullaniciId: Number(odul.davet_eden_id), puan: Number(odul.puan) };
+}
+
+// İade servisi eklendiğinde aynı transaction içinde çağrılmak üzere hazırdır.
+// Ödülü yalnızca bir kez geri alır ve puanı hiçbir zaman sıfırın altına düşürmez.
+export async function davetOdulunuGeriAl(odemeId) {
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const sonuc = await baglanti.query(
+      `UPDATE davet_odulleri SET durum='geri_alindi',geri_alinma=NOW()
+       WHERE odeme_id=$1 AND durum='kazanildi'
+       RETURNING davet_eden_id,davet_edilen_id,puan`,
+      [odemeId]
+    );
+    if (!sonuc.rows.length) {
+      await baglanti.query("COMMIT");
+      return false;
+    }
+    const odul = sonuc.rows[0];
+    await baglanti.query(
+      "UPDATE kullanicilar SET puan=GREATEST(0,puan-$1) WHERE id=$2",
+      [odul.puan, odul.davet_eden_id]
+    );
+    await baglanti.query(
+      `INSERT INTO puan_hareketleri
+        (kullanici_id,tur,puan,aciklama,odeme_id,kaynak_kullanici_id)
+       VALUES ($1,'davet_iadesi',$2,'İade edilen siparişin davet ödülü geri alındı',$3,$4)
+       ON CONFLICT (kullanici_id,tur,odeme_id) WHERE odeme_id IS NOT NULL DO NOTHING`,
+      [odul.davet_eden_id, -Number(odul.puan), odemeId, odul.davet_edilen_id]
+    );
+    await baglanti.query("COMMIT");
+    return true;
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
 }
 
 export async function odemeGetir(id) {
@@ -540,14 +699,23 @@ export async function masaKapat(masaNo) {
 // ============================================================================
 
 // Yeni kullanici olustur (sifre zaten hash'lenmis gelir).
-export async function kullaniciOlustur({ ad, soyad, cinsiyet, email, telefon, sifreHash }) {
-  const sonuc = await pool.query(
-    `INSERT INTO kullanicilar (ad, soyad, cinsiyet, email, telefon, sifre_hash)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, ad, soyad, cinsiyet, email, telefon, rol, puan`,
-    [ad, soyad, cinsiyet, email.toLowerCase(), telefon, sifreHash]
-  );
-  return sonuc.rows[0];
+export async function kullaniciOlustur({ ad, soyad, cinsiyet, email, telefon, sifreHash, davetEdenId = null }) {
+  for (let deneme = 0; deneme < 20; deneme += 1) {
+    try {
+      const sonuc = await pool.query(
+        `INSERT INTO kullanicilar
+          (ad,soyad,cinsiyet,email,telefon,sifre_hash,davet_kodu,davet_eden_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         RETURNING id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu`,
+        [ad, soyad, cinsiyet, email.toLowerCase(), telefon, sifreHash, davetKoduUret(), davetEdenId]
+      );
+      return kullaniciDonustur(sonuc.rows[0]);
+    } catch (e) {
+      const davetKoduCakismasi = e.code === "23505" && String(e.constraint || "").includes("davet_kodu");
+      if (!davetKoduCakismasi) throw e;
+    }
+  }
+  throw new Error("Benzersiz davet kodu üretilemedi.");
 }
 
 // E-posta ile kullanici bul (giris icin; sifre_hash dahil).
@@ -562,10 +730,51 @@ export async function kullaniciBulEmail(email) {
 // ID ile kullanici bul (token dogrulamasi sonrasi; sifre_hash HARIC).
 export async function kullaniciBulId(id) {
   const sonuc = await pool.query(
-    "SELECT id, ad, soyad, cinsiyet, email, telefon, rol, puan FROM kullanicilar WHERE id = $1",
+    "SELECT id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu FROM kullanicilar WHERE id=$1",
     [id]
   );
+  return sonuc.rows[0] ? kullaniciDonustur(sonuc.rows[0]) : null;
+}
+
+export async function davetKoduylaKullaniciBul(davetKodu) {
+  const sonuc = await pool.query(
+    "SELECT id,ad,soyad,davet_kodu FROM kullanicilar WHERE davet_kodu=$1",
+    [String(davetKodu || "").trim().toUpperCase()]
+  );
   return sonuc.rows[0] || null;
+}
+
+export async function davetOzetiniGetir(kullaniciId) {
+  const ozet = await pool.query(
+    `SELECT k.davet_kodu,
+      (SELECT COUNT(*)::int FROM kullanicilar d WHERE d.davet_eden_id=k.id) AS davet_edilen_sayisi,
+      (SELECT COUNT(*)::int FROM davet_odulleri o WHERE o.davet_eden_id=k.id AND o.durum='kazanildi') AS odullu_siparis_sayisi,
+      (SELECT COALESCE(SUM(o.puan),0)::int FROM davet_odulleri o WHERE o.davet_eden_id=k.id AND o.durum='kazanildi') AS kazanilan_puan
+     FROM kullanicilar k WHERE k.id=$1`,
+    [kullaniciId]
+  );
+  if (!ozet.rows.length) throw new Error("Kullanıcı bulunamadı.");
+  const sonHareketler = await pool.query(
+    `SELECT o.puan,o.siparis_tutari,o.olusturma,k.ad,k.soyad
+     FROM davet_odulleri o
+     JOIN kullanicilar k ON k.id=o.davet_edilen_id
+     WHERE o.davet_eden_id=$1 AND o.durum='kazanildi'
+     ORDER BY o.olusturma DESC LIMIT 10`,
+    [kullaniciId]
+  );
+  const veri = ozet.rows[0];
+  return {
+    davetKodu: veri.davet_kodu,
+    davetEdilenSayisi: Number(veri.davet_edilen_sayisi),
+    odulluSiparisSayisi: Number(veri.odullu_siparis_sayisi),
+    kazanilanPuan: Number(veri.kazanilan_puan),
+    sonHareketler: sonHareketler.rows.map((hareket) => ({
+      kisiAdi: `${hareket.ad} ${hareket.soyad}`,
+      siparisTutari: Number(hareket.siparis_tutari),
+      puan: Number(hareket.puan),
+      tarih: hareket.olusturma,
+    })),
+  };
 }
 
 // Kullanicinin puanini guncelle.
@@ -589,10 +798,24 @@ export async function kullaniciProfilGuncelle(id, { email, telefon }) {
   }
   const sonuc = await pool.query(
     `UPDATE kullanicilar SET email = $1, telefon = $2 WHERE id = $3
-     RETURNING id, ad, soyad, cinsiyet, email, telefon, rol, puan`,
+     RETURNING id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu`,
     [email.toLowerCase(), telefon, id]
   );
-  return { kullanici: sonuc.rows[0] };
+  return { kullanici: kullaniciDonustur(sonuc.rows[0]) };
+}
+
+function kullaniciDonustur(kullanici) {
+  return {
+    id: Number(kullanici.id),
+    ad: kullanici.ad,
+    soyad: kullanici.soyad,
+    cinsiyet: kullanici.cinsiyet,
+    email: kullanici.email,
+    telefon: kullanici.telefon,
+    rol: kullanici.rol,
+    puan: Number(kullanici.puan || 0),
+    davetKodu: kullanici.davet_kodu,
+  };
 }
 
 export async function kullaniciSiparisKaydet(kullaniciId, veri) {

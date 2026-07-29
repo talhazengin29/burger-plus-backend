@@ -9,6 +9,7 @@ import {
   kullaniciOlustur,
   kullaniciBulEmail,
   kullaniciBulId,
+  davetKoduylaKullaniciBul,
 } from "./db.js";
 
 // JWT gizli anahtari. Gercek uretimde .env'den gelmeli ve gizli olmali.
@@ -22,7 +23,13 @@ function emailGecerli(email) {
 
 // --- Kayit ---
 export async function kayitOl(veri) {
-  const { ad, soyad, cinsiyet, email, telefon, sifre } = veri;
+  const ad = String(veri?.ad || "").trim().slice(0, 60);
+  const soyad = String(veri?.soyad || "").trim().slice(0, 60);
+  const cinsiyet = String(veri?.cinsiyet || "").trim().slice(0, 20);
+  const email = String(veri?.email || "").trim().toLowerCase().slice(0, 254);
+  const telefon = String(veri?.telefon || "").trim().slice(0, 20);
+  const sifre = String(veri?.sifre || "");
+  const davetKodu = String(veri?.davetKodu || "").trim().toUpperCase();
 
   // Dogrulama
   if (!ad || !soyad || !email || !sifre) {
@@ -34,6 +41,10 @@ export async function kayitOl(veri) {
   if (sifre.length < 6) {
     return { hata: "Şifre en az 6 karakter olmalıdır." };
   }
+  if (sifre.length > 72) return { hata: "Şifre en fazla 72 karakter olabilir." };
+  if (davetKodu && !/^[A-HJ-NP-Z2-9]{8}$/.test(davetKodu)) {
+    return { hata: "Davet kodu 8 karakterli ve geçerli biçimde olmalıdır." };
+  }
 
   // E-posta zaten kayitli mi?
   const mevcut = await kullaniciBulEmail(email);
@@ -41,12 +52,21 @@ export async function kayitOl(veri) {
     return { hata: "Bu e-posta zaten kayıtlı." };
   }
 
+  const davetEden = davetKodu ? await davetKoduylaKullaniciBul(davetKodu) : null;
+  if (davetKodu && !davetEden) return { hata: "Davet kodu bulunamadı." };
+
   // Sifreyi hash'le (10 tur salt — senior standart)
   const sifreHash = await bcrypt.hash(sifre, 10);
 
-  const kullanici = await kullaniciOlustur({
-    ad, soyad, cinsiyet, email, telefon, sifreHash,
-  });
+  let kullanici;
+  try {
+    kullanici = await kullaniciOlustur({
+      ad, soyad, cinsiyet, email, telefon, sifreHash, davetEdenId: davetEden?.id || null,
+    });
+  } catch (e) {
+    if (e.code === "23505") return { hata: "Bu e-posta zaten kayıtlı." };
+    throw e;
+  }
 
   const token = tokenUret(kullanici.id);
   return { kullanici, token };
@@ -54,6 +74,8 @@ export async function kayitOl(veri) {
 
 // --- Giris ---
 export async function girisYap({ email, sifre }) {
+  email = String(email || "").trim().toLowerCase().slice(0, 254);
+  sifre = String(sifre || "");
   if (!email || !sifre) {
     return { hata: "E-posta ve şifre gerekli." };
   }
@@ -68,8 +90,7 @@ export async function girisYap({ email, sifre }) {
     return { hata: "E-posta veya şifre hatalı." };
   }
 
-  // sifre_hash'i disari sizdirma
-  const { sifre_hash, ...guvenli } = kullanici;
+  const guvenli = await kullaniciBulId(kullanici.id);
   const token = tokenUret(kullanici.id);
   return { kullanici: guvenli, token };
 }

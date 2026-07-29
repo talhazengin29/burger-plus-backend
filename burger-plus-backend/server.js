@@ -21,6 +21,7 @@ import {
   kullaniciProfilGuncelle,
   kullaniciSiparisKaydet,
   kullaniciSiparisleriniGetir,
+  davetOzetiniGetir,
   odemeTaslagiOlustur,
   odemeSimulasyonOnayla,
   odemeIyzicoOlarakOnayla,
@@ -76,6 +77,14 @@ app.post("/api/giris", async (req, res) => {
 // Ben kimim (token ile guncel kullanici bilgisi — sayfa yenilenince oturum korunur)
 app.get("/api/ben", korumaliMiddleware(), (req, res) => {
   res.json({ kullanici: req.kullanici });
+});
+
+app.get("/api/davetim", korumaliMiddleware(), async (req, res) => {
+  try {
+    res.json({ davet: await davetOzetiniGetir(req.kullanici.id) });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "Davet bilgileri alınamadı." });
+  }
 });
 
 // Puan guncelle (odeme sonrasi; sadece giris yapmis kullanici)
