@@ -206,6 +206,14 @@ app.post("/api/odeme/iyzico/callback", async (req, res) => {
   }
 });
 
+// FRONTEND_URL geçmişte protokolsüz girildiyse Express mutlak Vercel adresini
+// backend altında göreli bir yol sanıyordu. Eski dönüş linklerini güvenli,
+// yapılandırılmış frontend adresine taşıyan uyumluluk rotası.
+app.get("/api/odeme/iyzico/:yanlisHost/odeme-basarili", (req, res) => {
+  const odemeId = String(req.query?.odeme || "").trim();
+  res.redirect(303, iyzicoDonusAdresi(odemeId));
+});
+
 app.get("/api/odeme/:id/sonuc", opsiyonelKullaniciMiddleware(), async (req, res) => {
   const odeme = await odemeGetir(req.params.id);
   if (!odeme) return res.status(404).json({ hata: "Ödeme bulunamadı." });

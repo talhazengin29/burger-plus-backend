@@ -8,12 +8,27 @@ function ortamDegeri(ad) {
   return tirnakli ? deger.slice(1, -1).trim() : deger;
 }
 
+function mutlakTemelUrl(deger, ad) {
+  const ham = String(deger || "").trim();
+  if (!ham) return "";
+  const protokollu = /^https?:\/\//i.test(ham)
+    ? ham
+    : /^(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(ham) ? `http://${ham}` : `https://${ham}`;
+  try {
+    const url = new URL(protokollu);
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error();
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    throw new Error(`${ad} geçerli bir web adresi olmalı.`);
+  }
+}
+
 function ayarlar() {
   const apiKey = ortamDegeri("IYZICO_API_KEY");
   const secretKey = ortamDegeri("IYZICO_SECRET_KEY");
-  const uri = (ortamDegeri("IYZICO_BASE_URL") || "https://sandbox-api.iyzipay.com").replace(/\/$/, "");
-  const backendUrl = (ortamDegeri("PUBLIC_BACKEND_URL") || ortamDegeri("RENDER_EXTERNAL_URL")).replace(/\/$/, "");
-  const frontendUrl = ortamDegeri("FRONTEND_URL").replace(/\/$/, "");
+  const uri = mutlakTemelUrl(ortamDegeri("IYZICO_BASE_URL") || "https://sandbox-api.iyzipay.com", "IYZICO_BASE_URL");
+  const backendUrl = mutlakTemelUrl(ortamDegeri("PUBLIC_BACKEND_URL") || ortamDegeri("RENDER_EXTERNAL_URL"), "PUBLIC_BACKEND_URL");
+  const frontendUrl = mutlakTemelUrl(ortamDegeri("FRONTEND_URL"), "FRONTEND_URL");
   if (!apiKey || !secretKey) throw new Error("İyzico API anahtarları backend ortam değişkenlerinde tanımlı değil.");
   if (!backendUrl || !frontendUrl) throw new Error("PUBLIC_BACKEND_URL ve FRONTEND_URL ödeme callback'i için tanımlı olmalı.");
   return { apiKey, secretKey, uri, backendUrl, frontendUrl };
@@ -112,7 +127,7 @@ export async function iyzicoSonucuGetir(odeme, token) {
 }
 
 export function iyzicoDonusAdresi(odemeId) {
-  const frontendUrl = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
+  const frontendUrl = mutlakTemelUrl(ortamDegeri("FRONTEND_URL"), "FRONTEND_URL");
   if (!frontendUrl) return "/";
   return `${frontendUrl}/odeme-basarili?odeme=${encodeURIComponent(odemeId)}`;
 }

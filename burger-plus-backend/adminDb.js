@@ -1,4 +1,4 @@
-import pool from "./db.js";
+import pool, { davetKoduUret } from "./db.js";
 import bcrypt from "bcryptjs";
 
 const BASLANGIC_URUNLERI = [
@@ -47,6 +47,45 @@ const sayi = (deger, varsayilan = 0) => {
   return Number.isFinite(n) ? n : varsayilan;
 };
 
+const GRAMAJ_VARSAYILANLARI = {
+  "Burgerler": { etiket: "Köfte gramajı", birim: "gr", artisOrani: 0.25, miktarYuvarlama: 25, fiyatArtisOrani: 0.20, fiyatYuvarlama: 5, maxAdim: 3 },
+  "Yan Lezzetler": { etiket: "Porsiyon gramajı", birim: "gr", artisOrani: 0.25, miktarYuvarlama: 25, fiyatArtisOrani: 0.40, fiyatYuvarlama: 5, maxAdim: 3 },
+  "İçecekler": { etiket: "İçecek hacmi", birim: "ml", artisOrani: 0.25, miktarYuvarlama: 25, fiyatArtisOrani: 0.25, fiyatYuvarlama: 5, maxAdim: 3 },
+};
+
+const enYakinaYuvarla = (deger, adim) => Math.max(adim, Math.round(deger / adim) * adim);
+
+function varsayilanGramajOpsiyonu(kategori, temelMiktar, fiyat) {
+  const kural = GRAMAJ_VARSAYILANLARI[kategori];
+  const temel = sayi(temelMiktar);
+  if (!kural || temel <= 0) return null;
+  return {
+    aktif: true,
+    etiket: kural.etiket,
+    birim: kural.birim,
+    artisMiktari: enYakinaYuvarla(temel * kural.artisOrani, kural.miktarYuvarlama),
+    maxAdim: kural.maxAdim,
+    fiyatArtisi: enYakinaYuvarla(sayi(fiyat) * kural.fiyatArtisOrani, kural.fiyatYuvarlama),
+  };
+}
+
+function gramajOpsiyonunuDogrula(ham, temelMiktar) {
+  if (ham == null) return null;
+  if (typeof ham !== "object" || Array.isArray(ham)) throw new Error("Gramaj artırma kuralı geçersiz.");
+  const aktif = ham.aktif === true;
+  const etiket = String(ham.etiket || "Gramaj artırımı").trim().slice(0, 80);
+  const birim = String(ham.birim || "gr").trim().toLowerCase().slice(0, 12);
+  const artisMiktari = sayi(ham.artisMiktari, NaN);
+  const maxAdim = Math.floor(sayi(ham.maxAdim, NaN));
+  const fiyatArtisi = sayi(ham.fiyatArtisi, NaN);
+  if (!etiket || !/^[a-zçğıöşü]+$/i.test(birim)) throw new Error("Gramaj etiketi veya birimi geçersiz.");
+  if (!Number.isFinite(artisMiktari) || artisMiktari <= 0 || artisMiktari > 10000) throw new Error("Artış miktarı 0'dan büyük olmalıdır.");
+  if (!Number.isInteger(maxAdim) || maxAdim < 1 || maxAdim > 20) throw new Error("Maksimum artış adımı 1–20 arasında olmalıdır.");
+  if (!Number.isFinite(fiyatArtisi) || fiyatArtisi < 0 || fiyatArtisi > 100000) throw new Error("Gramaj fiyat artışı geçersiz.");
+  if (aktif && sayi(temelMiktar) <= 0) throw new Error("Gramaj artırımı için temel miktar gereklidir.");
+  return { aktif, etiket, birim, artisMiktari, maxAdim, fiyatArtisi };
+}
+
 export async function ilkYerelAdminOlustur({ email, sifre }) {
   const yerelVeritabani = !process.env.DATABASE_URL && ["localhost", "127.0.0.1"].includes(process.env.PGHOST);
   if (!yerelVeritabani) throw new Error("İlk admin kurulumu yalnızca yerel geliştirme ortamında kullanılabilir.");
@@ -57,9 +96,9 @@ export async function ilkYerelAdminOlustur({ email, sifre }) {
   if (adminVar.rows.length) throw new Error("İlk yönetici daha önce oluşturulmuş.");
   const sifreHash = await bcrypt.hash(String(sifre), 10);
   await pool.query(
-    `INSERT INTO kullanicilar (ad,soyad,email,sifre_hash,rol)
-     VALUES ('İşletme','Yöneticisi',$1,$2,'admin')`,
-    [String(email).toLowerCase(), sifreHash]
+    `INSERT INTO kullanicilar (ad,soyad,email,sifre_hash,rol,davet_kodu)
+     VALUES ('İşletme','Yöneticisi',$1,$2,'admin',$3)`,
+    [String(email).toLowerCase(), sifreHash, davetKoduUret()]
   );
 }
 
@@ -148,6 +187,18 @@ export async function adminTablolariHazirla() {
     );
   }
 
+  // Eski ürünlerin ekranda kullanılan dinamik varsayılanlarını bir defa ürün
+  // datasına yaz. Adminin daha sonra değiştirdiği veya kapattığı kural korunur.
+  const gramajsizUrunler = await pool.query(
+    "SELECT id,kategori,temel_miktar,fiyat FROM urunler WHERE gramaj_opsiyonu IS NULL"
+  );
+  for (const urun of gramajsizUrunler.rows) {
+    const gramajOpsiyonu = varsayilanGramajOpsiyonu(urun.kategori, urun.temel_miktar, urun.fiyat);
+    if (gramajOpsiyonu) {
+      await pool.query("UPDATE urunler SET gramaj_opsiyonu=$1::jsonb WHERE id=$2 AND gramaj_opsiyonu IS NULL", [JSON.stringify(gramajOpsiyonu), urun.id]);
+    }
+  }
+
   // Demo başlangıç verileri yalnızca bir defa eklenir. Sonraki başlangıçlarda
   // adminin eklediği/değiştirdiği kayıtlar korunur ve veriler çoğalmaz.
   const demoKuruldu = await pool.query("SELECT 1 FROM sistem_ayarlari WHERE anahtar='demo_seed_v1'");
@@ -204,6 +255,8 @@ export async function urunleriGetir({ tumu = false } = {}) {
 }
 
 export async function urunKaydet(veri) {
+  const temelMiktar = veri.temelMiktar === "" || veri.temelMiktar == null ? null : sayi(veri.temelMiktar);
+  const gramajOpsiyonu = gramajOpsiyonunuDogrula(veri.gramajOpsiyonu, temelMiktar);
   const alanlar = [
     String(veri.ad || "").trim().slice(0, 120),
     sayi(veri.fiyat),
@@ -212,8 +265,8 @@ export async function urunKaydet(veri) {
     veri.aciklama ? String(veri.aciklama).slice(0, 2000) : null,
     JSON.stringify(Array.isArray(veri.malzemeler) ? veri.malzemeler.slice(0, 100) : []),
     JSON.stringify(Array.isArray(veri.alerjenler) ? veri.alerjenler.slice(0, 50) : []),
-    veri.temelMiktar === "" || veri.temelMiktar == null ? null : sayi(veri.temelMiktar),
-    veri.gramajOpsiyonu == null ? null : JSON.stringify(veri.gramajOpsiyonu),
+    temelMiktar,
+    gramajOpsiyonu == null ? null : JSON.stringify(gramajOpsiyonu),
     veri.aktif !== false,
   ];
   if (!alanlar[0] || alanlar[1] < 0) throw new Error("Ürün adı ve geçerli fiyat zorunludur.");

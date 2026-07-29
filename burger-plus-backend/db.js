@@ -15,7 +15,7 @@ const { Pool } = pkg;
 
 const DAVET_KODU_KARAKTERLERI = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-function davetKoduUret() {
+export function davetKoduUret() {
   const rastgele = randomBytes(8);
   return Array.from(rastgele, (deger) => DAVET_KODU_KARAKTERLERI[deger % DAVET_KODU_KARAKTERLERI.length]).join("");
 }
