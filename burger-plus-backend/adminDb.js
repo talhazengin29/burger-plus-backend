@@ -140,6 +140,7 @@ export async function adminTablolariHazirla() {
   }
   await pool.query("SELECT setval('urunler_id_seq', GREATEST((SELECT COALESCE(MAX(id),1) FROM urunler), 20))");
 
+  // Yeni eklenen başlangıç ürünleri eski kurulumlarda da içerikleriyle görünür.
   for (const [id, malzemeler] of Object.entries(BASLANGIC_MALZEMELERI)) {
     await pool.query(
       "UPDATE urunler SET malzemeler=$1::jsonb WHERE id=$2 AND malzemeler='[]'::jsonb",
@@ -328,16 +329,31 @@ export async function dashboardGetir() {
 
 export async function satisRaporuGetir(gun = 30) {
   const aralik = Math.min(365, Math.max(1, sayi(gun, 30)));
-  const [gunluk, urunler] = await Promise.all([
+  const [gunluk, urunler, kategoriler, saatlik, haftalik] = await Promise.all([
     pool.query(`SELECT date_trunc('day',olusturma)::date gun, SUM(fiyat*adet) ciro, SUM(adet) adet
       FROM siparis_kalemleri WHERE olusturma >= NOW()-($1::text || ' days')::interval
       GROUP BY 1 ORDER BY 1`, [aralik]),
     pool.query(`SELECT urun_ad, SUM(adet) adet, SUM(fiyat*adet) ciro
       FROM siparis_kalemleri WHERE olusturma >= NOW()-($1::text || ' days')::interval
       GROUP BY urun_ad ORDER BY ciro DESC`, [aralik]),
+    pool.query(`SELECT COALESCE(u.kategori,'Diğer') kategori, SUM(k.adet)::int adet, SUM(k.fiyat*k.adet) ciro
+      FROM siparis_kalemleri k LEFT JOIN urunler u ON u.id=k.urun_id
+      WHERE k.olusturma >= NOW()-($1::text || ' days')::interval
+      GROUP BY 1 ORDER BY adet DESC`, [aralik]),
+    pool.query(`SELECT EXTRACT(HOUR FROM olusturma)::int saat, SUM(adet)::int adet,
+        COUNT(DISTINCT COALESCE(siparis_no,id::text))::int siparis
+      FROM siparis_kalemleri WHERE olusturma >= NOW()-($1::text || ' days')::interval
+      GROUP BY 1 ORDER BY 1`, [aralik]),
+    pool.query(`SELECT EXTRACT(ISODOW FROM olusturma)::int gun, SUM(adet)::int adet,
+        SUM(fiyat*adet) ciro
+      FROM siparis_kalemleri WHERE olusturma >= NOW()-($1::text || ' days')::interval
+      GROUP BY 1 ORDER BY 1`, [aralik]),
   ]);
   return {
     gunluk: gunluk.rows.map((g) => ({ ...g, ciro: Number(g.ciro), adet: Number(g.adet) })),
     urunler: urunler.rows.map((u) => ({ ...u, ciro: Number(u.ciro), adet: Number(u.adet) })),
+    kategoriler: kategoriler.rows.map((k) => ({ ...k, ciro: Number(k.ciro), adet: Number(k.adet) })),
+    saatlik: saatlik.rows.map((s) => ({ ...s, saat: Number(s.saat), adet: Number(s.adet), siparis: Number(s.siparis) })),
+    haftalik: haftalik.rows.map((h) => ({ ...h, gun: Number(h.gun), adet: Number(h.adet), ciro: Number(h.ciro) })),
   };
 }

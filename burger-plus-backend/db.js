@@ -8,6 +8,7 @@
 
 import pkg from "pg";
 import dotenv from "dotenv";
+import { randomUUID } from "crypto";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -68,6 +69,13 @@ export async function tablolariHazirla() {
     ALTER TABLE siparis_kalemleri
     ADD COLUMN IF NOT EXISTS secimler JSONB NOT NULL DEFAULT '{}'::jsonb
   `);
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS odeme_id UUID");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS odeme_kalem_no INTEGER");
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS tek_odeme_siparis_kalemi
+    ON siparis_kalemleri (odeme_id, odeme_kalem_no)
+    WHERE odeme_id IS NOT NULL AND odeme_kalem_no IS NOT NULL
+  `);
 
   // Kullanıcılar tablosu. rol='kullanici' varsayılan; admin elle işaretlenir:
   //   UPDATE kullanicilar SET rol='admin' WHERE email='...';
@@ -101,6 +109,34 @@ export async function tablolariHazirla() {
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (kullanici_id, siparis_no)
     )
+  `);
+
+  // Ödeme sağlayıcısından bağımsız sipariş taslağı. Sağlayıcı tokenı ve sonuç
+  // burada tutulur; mutfağa yalnızca "basarili" ödeme aktarılabilir.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS odeme_islemleri (
+      id UUID PRIMARY KEY,
+      kullanici_id INTEGER REFERENCES kullanicilar(id) ON DELETE SET NULL,
+      siparis_no TEXT NOT NULL UNIQUE,
+      masa_no TEXT,
+      siparis_tipi TEXT NOT NULL,
+      yontem TEXT NOT NULL,
+      kisi_adi TEXT NOT NULL DEFAULT 'Misafir',
+      urunler JSONB NOT NULL DEFAULT '[]'::jsonb,
+      tutar NUMERIC NOT NULL CHECK (tutar >= 0),
+      kazanilan_puan INTEGER NOT NULL DEFAULT 0,
+      para_birimi TEXT NOT NULL DEFAULT 'TRY',
+      saglayici TEXT NOT NULL DEFAULT 'hazirlanıyor',
+      saglayici_token TEXT UNIQUE,
+      durum TEXT NOT NULL DEFAULT 'bekliyor',
+      mutfaga_aktarildi BOOLEAN NOT NULL DEFAULT false,
+      son_gecerlilik TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '20 minutes',
+      basarili_at TIMESTAMPTZ,
+      olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS odeme_islemleri_kullanici_idx
+      ON odeme_islemleri (kullanici_id, olusturma DESC);
   `);
 
   // --- Migration: mevcut tablolarda olusturma sütununu TIMESTAMPTZ'ye çevir ---
@@ -218,7 +254,7 @@ export async function masaSiparisleriniGetir(masaNo) {
 }
 
 // Masaya yeni kalem ekle.
-export async function kalemEkle(masaNo, urun, kisiAdi, gelenSecimler = {}, gelenHaricMalzemeler = [], siparisNo = null) {
+export async function kalemEkle(masaNo, urun, kisiAdi, gelenSecimler = {}, gelenHaricMalzemeler = [], siparisNo = null, odemeId = null, odemeKalemNo = null) {
   const oturum = await masaOturumuBulVeyaOlustur(masaNo);
   const haricAdaylari = Array.isArray(gelenHaricMalzemeler)
     ? gelenHaricMalzemeler
@@ -263,11 +299,205 @@ export async function kalemEkle(masaNo, urun, kisiAdi, gelenSecimler = {}, gelen
   };
   const adet = urun.adet || 1;
   await pool.query(
-    `INSERT INTO siparis_kalemleri (oturum_id, urun_id, urun_ad, fiyat, adet, kisi_adi, secimler, siparis_no)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
-    [oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo]
+    `INSERT INTO siparis_kalemleri
+      (oturum_id, urun_id, urun_ad, fiyat, adet, kisi_adi, secimler, siparis_no, odeme_id, odeme_kalem_no)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+     ON CONFLICT (odeme_id, odeme_kalem_no)
+       WHERE odeme_id IS NOT NULL AND odeme_kalem_no IS NOT NULL DO NOTHING`,
+    [oturum.id, urun.id, urun.ad, urun.fiyat, adet, kisiAdi || "Misafir", JSON.stringify(secimler), siparisNo, odemeId, odemeKalemNo]
   );
   return masaSiparisleriniGetir(masaNo);
+}
+
+// Ödeme ve mutfak akışında fiyat yalnızca backend kataloğundan hesaplanır.
+// İstemcinin gönderdiği fiyat/ad/metin alanları hiçbir şekilde kaynak kabul edilmez.
+async function odemeUrunleriniDogrula(hamUrunler) {
+  if (!Array.isArray(hamUrunler) || hamUrunler.length < 1 || hamUrunler.length > 50) {
+    throw new Error("Ödeme için geçerli ürünler gerekli.");
+  }
+  const idler = [...new Set(hamUrunler.map((u) => Number(u?.id)).filter(Number.isInteger))];
+  if (!idler.length) throw new Error("Ürün bilgisi geçersiz.");
+
+  const sonuc = await pool.query(
+    `SELECT id,ad,fiyat,kategori,malzemeler,temel_miktar,gramaj_opsiyonu,aktif
+     FROM urunler WHERE id = ANY($1::int[])`,
+    [idler]
+  );
+  const katalog = new Map(sonuc.rows.map((urun) => [Number(urun.id), urun]));
+
+  return hamUrunler.map((ham) => {
+    const urun = katalog.get(Number(ham?.id));
+    if (!urun || !urun.aktif) throw new Error("Sepetteki ürün artık satışta değil.");
+    const adet = Math.floor(Number(ham?.adet || 0));
+    if (!Number.isInteger(adet) || adet < 1 || adet > 30) throw new Error("Ürün adedi geçersiz.");
+
+    const kural = urun.gramaj_opsiyonu && urun.gramaj_opsiyonu.aktif ? urun.gramaj_opsiyonu : null;
+    const gonderilenSecimler = ham?.secimler && typeof ham.secimler === "object" ? ham.secimler : {};
+    const istenenEkstra = Number(gonderilenSecimler.ekstraGramaj || 0);
+    let ekstraGramaj = 0;
+    let gramajFiyat = 0;
+    if (kural) {
+      const artis = Number(kural.artisMiktari);
+      const maxAdim = Number(kural.maxAdim);
+      const fiyatArtisi = Number(kural.fiyatArtisi);
+      const adim = artis > 0 ? istenenEkstra / artis : NaN;
+      if (!Number.isInteger(adim) || adim < 0 || adim > maxAdim) {
+        throw new Error(`${urun.ad} için gramaj seçimi geçersiz.`);
+      }
+      ekstraGramaj = adim * artis;
+      gramajFiyat = adim * fiyatArtisi;
+    } else if (istenenEkstra !== 0) {
+      throw new Error(`${urun.ad} için gramaj artırımı bulunmuyor.`);
+    }
+
+    const tumMalzemeler = Array.isArray(urun.malzemeler) ? urun.malzemeler : [];
+    const haricAdaylari = Array.isArray(ham?.haricMalzemeler)
+      ? ham.haricMalzemeler
+      : Array.isArray(gonderilenSecimler.haricMalzemeler) ? gonderilenSecimler.haricMalzemeler : [];
+    const haricMalzemeler = [...new Set(haricAdaylari
+      .filter((m) => typeof m === "string" && tumMalzemeler.includes(m)))]
+      .slice(0, 50);
+    const standartGramaj = Number(urun.temel_miktar || 0);
+    const secimler = {
+      dahilMalzemeler: tumMalzemeler.filter((m) => !haricMalzemeler.includes(m)),
+      haricMalzemeler,
+      ...(standartGramaj > 0 ? {
+        standartGramaj,
+        ekstraGramaj,
+        toplamGramaj: standartGramaj + ekstraGramaj,
+        gramajEtiketi: kural?.etiket || "Ürün gramajı",
+        gramajBirim: kural?.birim || (urun.kategori === "İçecekler" ? "ml" : "gr"),
+      } : {}),
+    };
+    return {
+      id: Number(urun.id),
+      ad: urun.ad,
+      kategori: urun.kategori,
+      adet,
+      fiyat: Number(urun.fiyat) + gramajFiyat,
+      temelMiktar: standartGramaj || null,
+      malzemeler: tumMalzemeler,
+      gramajOpsiyonu: kural,
+      haricMalzemeler,
+      secimler,
+    };
+  });
+}
+
+export async function odemeTaslagiOlustur({ kullaniciId = null, masaNo = null, yontem = "tam", urunler, kisiAdi = "Misafir" }) {
+  const guvenliUrunler = await odemeUrunleriniDogrula(urunler);
+  const tip = masaNo ? "masa" : "algotur";
+  const guvenliMasa = masaNo ? String(masaNo).slice(0, 30) : null;
+  const guvenliYontem = ["tam", "esit", "urun"].includes(yontem) ? yontem : "tam";
+  const tutar = guvenliUrunler.reduce((toplam, urun) => toplam + urun.fiyat * urun.adet, 0);
+  const kazanilanPuan = kullaniciId ? Math.floor(tutar / 10) : 0;
+  const id = randomUUID();
+  const siparisNo = `BP-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const sonuc = await pool.query(
+    `INSERT INTO odeme_islemleri
+      (id,kullanici_id,siparis_no,masa_no,siparis_tipi,yontem,kisi_adi,urunler,tutar,kazanilan_puan)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10) RETURNING *`,
+    [id, kullaniciId, siparisNo, guvenliMasa, tip, guvenliYontem,
+      String(kisiAdi || "Misafir").trim().slice(0, 120) || "Misafir",
+      JSON.stringify(guvenliUrunler), tutar, kazanilanPuan]
+  );
+  return odemeDonustur(sonuc.rows[0]);
+}
+
+export async function odemeSimulasyonOnayla(id, kullaniciId = null) {
+  return odemeBasariliOlarakIsle(id, "simulasyon", null, kullaniciId);
+}
+
+export async function odemeIyzicoOlarakOnayla(id, token) {
+  return odemeBasariliOlarakIsle(id, "iyzico", token, null);
+}
+
+async function odemeBasariliOlarakIsle(id, saglayici, saglayiciToken, kullaniciId = null) {
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const sonuc = await baglanti.query(
+      `UPDATE odeme_islemleri
+       SET durum='basarili', saglayici=$2, saglayici_token=COALESCE($3, saglayici_token), basarili_at=NOW(), guncelleme=NOW()
+       WHERE id=$1 AND durum='bekliyor' AND son_gecerlilik > NOW()
+         AND ($4::int IS NULL OR kullanici_id=$4)
+       RETURNING *`,
+      [id, saglayici, saglayiciToken, kullaniciId]
+    );
+    if (sonuc.rows.length) {
+      const odeme = sonuc.rows[0];
+      let guncelPuan = null;
+      if (odeme.kullanici_id && Number(odeme.kazanilan_puan) > 0) {
+        const puanSonuc = await baglanti.query(
+          "UPDATE kullanicilar SET puan=puan+$1 WHERE id=$2 RETURNING puan",
+          [odeme.kazanilan_puan, odeme.kullanici_id]
+        );
+        guncelPuan = Number(puanSonuc.rows[0]?.puan);
+      }
+      await baglanti.query("COMMIT");
+      return { odeme: { ...odemeDonustur(odeme), guncelPuan }, ilkOnay: true };
+    }
+    await baglanti.query("COMMIT");
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
+
+  const mevcut = await pool.query("SELECT * FROM odeme_islemleri WHERE id=$1", [id]);
+  if (!mevcut.rows.length) throw new Error("Ödeme taslağı bulunamadı.");
+  if (kullaniciId && Number(mevcut.rows[0].kullanici_id) !== Number(kullaniciId)) {
+    throw new Error("Bu ödeme taslağı başka bir hesaba ait.");
+  }
+  const odeme = odemeDonustur(mevcut.rows[0]);
+  if (odeme.durum !== "basarili") throw new Error("Ödeme taslağının süresi dolmuş veya işlem tamamlanamamış.");
+  return { odeme, ilkOnay: false };
+}
+
+export async function odemeGetir(id) {
+  const sonuc = await pool.query("SELECT * FROM odeme_islemleri WHERE id=$1", [id]);
+  return sonuc.rows[0] ? odemeDonustur(sonuc.rows[0]) : null;
+}
+
+export async function odemeSaglayiciTokenKaydet(id, token) {
+  const sonuc = await pool.query(
+    `UPDATE odeme_islemleri SET saglayici='iyzico', saglayici_token=$2, guncelleme=NOW()
+     WHERE id=$1 AND durum='bekliyor' RETURNING *`,
+    [id, token]
+  );
+  if (!sonuc.rows.length) throw new Error("Ödeme taslağı ödeme başlatmak için uygun değil.");
+  return odemeDonustur(sonuc.rows[0]);
+}
+
+export async function iyzicoTokeniyleOdemeGetir(token) {
+  const sonuc = await pool.query("SELECT * FROM odeme_islemleri WHERE saglayici_token=$1", [token]);
+  return sonuc.rows[0] ? odemeDonustur(sonuc.rows[0]) : null;
+}
+
+export async function odemeMutfagaAktarildi(id) {
+  await pool.query(
+    "UPDATE odeme_islemleri SET mutfaga_aktarildi=true, guncelleme=NOW() WHERE id=$1 AND durum='basarili'",
+    [id]
+  );
+}
+
+function odemeDonustur(odeme) {
+  return {
+    id: odeme.id,
+    siparisNo: odeme.siparis_no,
+    kullaniciId: odeme.kullanici_id,
+    masaNo: odeme.masa_no,
+    tip: odeme.siparis_tipi,
+    yontem: odeme.yontem,
+    kisiAdi: odeme.kisi_adi,
+    urunler: Array.isArray(odeme.urunler) ? odeme.urunler : [],
+    tutar: Number(odeme.tutar),
+    kazanilanPuan: Number(odeme.kazanilan_puan),
+    durum: odeme.durum,
+    mutfagaAktarildi: odeme.mutfaga_aktarildi,
+    tarih: odeme.olusturma,
+  };
 }
 
 // Mutfak: bir masanin tum kalemlerini belirli duruma gecir.

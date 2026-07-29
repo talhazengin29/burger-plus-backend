@@ -105,6 +105,17 @@ export function korumaliMiddleware() {
   };
 }
 
+// Misafir ödeme akışını destekler; token varsa kullanıcıyı ekler, yoksa isteği
+// engellemez. Ödeme tutarı ve sipariş içeriği yine backend tarafından doğrulanır.
+export function opsiyonelKullaniciMiddleware() {
+  return async (req, _res, next) => {
+    const baslik = req.headers.authorization || "";
+    const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
+    if (token) req.kullanici = await tokenDogrula(token);
+    next();
+  };
+}
+
 // Yönetim uçları yalnızca rolü admin olan gerçek kullanıcı hesabına açıktır.
 export function adminMiddleware() {
   return async (req, res, next) => {

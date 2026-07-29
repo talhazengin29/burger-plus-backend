@@ -21,7 +21,15 @@ import {
   kullaniciProfilGuncelle,
   kullaniciSiparisKaydet,
   kullaniciSiparisleriniGetir,
+  odemeTaslagiOlustur,
+  odemeSimulasyonOnayla,
+  odemeIyzicoOlarakOnayla,
+  odemeGetir,
+  odemeSaglayiciTokenKaydet,
+  iyzicoTokeniyleOdemeGetir,
+  odemeMutfagaAktarildi,
 } from "./db.js";
+import { iyzicoCheckoutBaslat, iyzicoSonucuGetir, iyzicoDonusAdresi } from "./iyzico.js";
 import {
   adminTablolariHazirla,
   ilkYerelAdminOlustur,
@@ -37,11 +45,12 @@ import {
   duyurulariGetir,
   duyuruKaydet,
 } from "./adminDb.js";
-import { kayitOl, girisYap, korumaliMiddleware, adminMiddleware } from "./auth.js";
+import { kayitOl, girisYap, korumaliMiddleware, adminMiddleware, opsiyonelKullaniciMiddleware } from "./auth.js";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -112,6 +121,86 @@ app.get("/api/duyurular", async (_req, res) => {
   res.json({ duyurular: await duyurulariGetir() });
 });
 
+// Ödeme sağlayıcısı bağlanmadan önce de sipariş ve tutar backend'de güvenli
+// taslak olarak hazırlanır. İyzico entegrasyonunda yalnızca onay endpointi
+// değişecek; taslak ve mutfağa aktarım akışı aynı kalacak.
+app.post("/api/odeme/taslak", opsiyonelKullaniciMiddleware(), async (req, res) => {
+  try {
+    const kullanici = req.kullanici || null;
+    const kisiAdi = kullanici ? `${kullanici.ad} ${kullanici.soyad}` : "Misafir";
+    const odeme = await odemeTaslagiOlustur({
+      kullaniciId: kullanici?.id || null,
+      masaNo: req.body?.masaNo || null,
+      yontem: req.body?.yontem,
+      urunler: req.body?.urunler,
+      kisiAdi,
+    });
+    res.status(201).json({ odeme });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "Ödeme taslağı oluşturulamadı." });
+  }
+});
+
+// Yalnızca geliştirmede gerçek ödeme sağlayıcısı yerine akışı test eder.
+// Render/production ortamında kapalıdır; İyzico sonucu bu endpointin yerini alır.
+app.post("/api/odeme/:id/simulasyon-onay", opsiyonelKullaniciMiddleware(), async (req, res) => {
+  if (process.env.NODE_ENV === "production" || process.env.ODEME_SIMULASYONU === "kapali") {
+    return res.status(403).json({ hata: "Test ödeme onayı canlı ortamda kapalıdır." });
+  }
+  try {
+    const sonuc = await odemeSimulasyonOnayla(req.params.id, req.kullanici?.id || null);
+    const odeme = sonuc.odeme;
+    await onaylananOdemeyiMutfagaAktar(odeme);
+    res.json({ odeme: { ...odeme, mutfagaAktarildi: true } });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "Test ödemesi onaylanamadı." });
+  }
+});
+
+app.post("/api/odeme/:id/iyzico-baslat", opsiyonelKullaniciMiddleware(), async (req, res) => {
+  try {
+    const odeme = await odemeGetir(req.params.id);
+    if (!odeme) return res.status(404).json({ hata: "Ödeme taslağı bulunamadı." });
+    if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
+      return res.status(403).json({ hata: "Bu ödeme taslağı başka bir hesaba ait." });
+    }
+    if (odeme.durum !== "bekliyor") return res.status(400).json({ hata: "Bu ödeme taslağı yeniden başlatılamaz." });
+    const form = await iyzicoCheckoutBaslat(odeme, req.body?.alici, req.ip);
+    await odemeSaglayiciTokenKaydet(odeme.id, form.token);
+    res.json({ paymentPageUrl: form.paymentPageUrl });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "İyzico ödeme formu başlatılamadı." });
+  }
+});
+
+app.post("/api/odeme/iyzico/callback", async (req, res) => {
+  const token = String(req.body?.token || "").trim();
+  let odeme = null;
+  try {
+    if (!token) throw new Error("İyzico ödeme tokenı bulunamadı.");
+    odeme = await iyzicoTokeniyleOdemeGetir(token);
+    if (!odeme) throw new Error("Ödeme oturumu bulunamadı.");
+    await iyzicoSonucuGetir(odeme, token);
+    const sonuc = await odemeIyzicoOlarakOnayla(odeme.id, token);
+    await onaylananOdemeyiMutfagaAktar(sonuc.odeme);
+    res.redirect(303, iyzicoDonusAdresi(odeme.id));
+  } catch (e) {
+    console.error("İyzico callback:", e.message);
+    const donus = iyzicoDonusAdresi(odeme?.id || "");
+    const ayirac = donus.includes("?") ? "&" : "?";
+    res.redirect(303, `${donus}${ayirac}odemeHatasi=${encodeURIComponent("Ödeme onaylanamadı.")}`);
+  }
+});
+
+app.get("/api/odeme/:id/sonuc", opsiyonelKullaniciMiddleware(), async (req, res) => {
+  const odeme = await odemeGetir(req.params.id);
+  if (!odeme) return res.status(404).json({ hata: "Ödeme bulunamadı." });
+  if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
+    return res.status(403).json({ hata: "Bu ödeme başka bir hesaba ait." });
+  }
+  res.json({ odeme });
+});
+
 app.post("/api/yerel-admin-kurulum", yerelAdminKurulum);
 app.get("/api/yerel-admin-durum", async (req, res) => {
   const ip = req.socket.remoteAddress || "";
@@ -169,6 +258,35 @@ app.get("/", (req, res) => res.send("Burger Plus backend calisiyor (PostgreSQL)"
 
 // Saglik kontrolu — Render/izleme araclari icin
 app.get("/saglik", (req, res) => res.json({ durum: "calisiyor", zaman: new Date().toISOString() }));
+
+async function onaylananOdemeyiMutfagaAktar(odeme) {
+  if (odeme.mutfagaAktarildi) return;
+  const masaNo = odeme.masaNo || "algotur";
+  await masaSirayaAl(masaNo, async () => {
+    for (const [kalemNo, urun] of odeme.urunler.entries()) {
+      await kalemEkle(
+        masaNo, urun, odeme.kisiAdi, urun.secimler, urun.haricMalzemeler,
+        odeme.siparisNo, odeme.id, kalemNo
+      );
+    }
+    if (odeme.kullaniciId) {
+      await kullaniciSiparisKaydet(odeme.kullaniciId, {
+        id: odeme.siparisNo,
+        siparisNo: odeme.siparisNo,
+        masaNo: odeme.masaNo,
+        tip: odeme.tip,
+        urunler: odeme.urunler,
+        tutar: odeme.tutar,
+        kazanilanPuan: odeme.kazanilanPuan,
+      });
+    }
+    await odemeMutfagaAktarildi(odeme.id);
+    const tumMasalar = await tumAcikMasalar();
+    io.to(`masa-${masaNo}`).emit("masa-guncellendi", await masaSiparisleriniGetir(masaNo));
+    io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
+    io.to("salon").emit("salon-guncellendi", tumMasalar);
+  });
+}
 
 // --- Socket.io ---
 // Aynı masaya ait olayları sıraya al. Böylece çok ürünlü sipariş, durum
