@@ -169,6 +169,11 @@ app.post("/api/odeme/:id/iyzico-baslat", opsiyonelKullaniciMiddleware(), async (
     await odemeSaglayiciTokenKaydet(odeme.id, form.token);
     res.json({ paymentPageUrl: form.paymentPageUrl });
   } catch (e) {
+    console.error("İyzico ödeme formu başlatılamadı:", {
+      mesaj: e.message,
+      kod: e.iyzicoKod || "yok",
+      ortam: String(process.env.IYZICO_BASE_URL || "sandbox").trim(),
+    });
     res.status(400).json({ hata: e.message || "İyzico ödeme formu başlatılamadı." });
   }
 });

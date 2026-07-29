@@ -2,12 +2,18 @@ import Iyzipay from "iyzipay";
 
 const para = (tutar) => Number(tutar).toFixed(2);
 
+function ortamDegeri(ad) {
+  const deger = String(process.env[ad] || "").trim();
+  const tirnakli = (deger.startsWith('"') && deger.endsWith('"')) || (deger.startsWith("'") && deger.endsWith("'"));
+  return tirnakli ? deger.slice(1, -1).trim() : deger;
+}
+
 function ayarlar() {
-  const apiKey = process.env.IYZICO_API_KEY;
-  const secretKey = process.env.IYZICO_SECRET_KEY;
-  const uri = process.env.IYZICO_BASE_URL || "https://sandbox-api.iyzipay.com";
-  const backendUrl = (process.env.PUBLIC_BACKEND_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/$/, "");
-  const frontendUrl = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
+  const apiKey = ortamDegeri("IYZICO_API_KEY");
+  const secretKey = ortamDegeri("IYZICO_SECRET_KEY");
+  const uri = (ortamDegeri("IYZICO_BASE_URL") || "https://sandbox-api.iyzipay.com").replace(/\/$/, "");
+  const backendUrl = (ortamDegeri("PUBLIC_BACKEND_URL") || ortamDegeri("RENDER_EXTERNAL_URL")).replace(/\/$/, "");
+  const frontendUrl = ortamDegeri("FRONTEND_URL").replace(/\/$/, "");
   if (!apiKey || !secretKey) throw new Error("İyzico API anahtarları backend ortam değişkenlerinde tanımlı değil.");
   if (!backendUrl || !frontendUrl) throw new Error("PUBLIC_BACKEND_URL ve FRONTEND_URL ödeme callback'i için tanımlı olmalı.");
   return { apiKey, secretKey, uri, backendUrl, frontendUrl };
@@ -35,8 +41,16 @@ function aliciDogrula(alici = {}) {
 function iyzicoCagir(kaynak, metod, istek) {
   return new Promise((resolve, reject) => {
     kaynak[metod](istek, (hata, sonuc) => {
-      if (hata) return reject(new Error(hata.errorMessage || "İyzico isteği tamamlanamadı."));
-      if (!sonuc || sonuc.status !== "success") return reject(new Error(sonuc?.errorMessage || "İyzico ödeme formu başlatılamadı."));
+      if (hata) {
+        const hataNesnesi = new Error(hata.errorMessage || hata.message || "İyzico isteği tamamlanamadı.");
+        hataNesnesi.iyzicoKod = hata.errorCode || hata.code;
+        return reject(hataNesnesi);
+      }
+      if (!sonuc || sonuc.status !== "success") {
+        const hataNesnesi = new Error(sonuc?.errorMessage || "İyzico ödeme formu başlatılamadı.");
+        hataNesnesi.iyzicoKod = sonuc?.errorCode;
+        return reject(hataNesnesi);
+      }
       resolve(sonuc);
     });
   });
