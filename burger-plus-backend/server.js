@@ -19,6 +19,8 @@ import {
   masaKapat,
   kullaniciPuanGuncelle,
   kullaniciProfilGuncelle,
+  kullaniciSiparisKaydet,
+  kullaniciSiparisleriniGetir,
 } from "./db.js";
 import {
   adminTablolariHazirla,
@@ -32,6 +34,8 @@ import {
   vardiyaDegistir,
   dashboardGetir,
   satisRaporuGetir,
+  duyurulariGetir,
+  duyuruKaydet,
 } from "./adminDb.js";
 import { kayitOl, girisYap, korumaliMiddleware, adminMiddleware } from "./auth.js";
 
@@ -80,6 +84,19 @@ app.post("/api/profil", korumaliMiddleware(), async (req, res) => {
   res.json(sonuc);
 });
 
+app.get("/api/siparislerim", korumaliMiddleware(), async (req, res) => {
+  res.json({ siparisler: await kullaniciSiparisleriniGetir(req.kullanici.id) });
+});
+
+app.post("/api/siparislerim", korumaliMiddleware(), async (req, res) => {
+  try {
+    const siparis = await kullaniciSiparisKaydet(req.kullanici.id, req.body || {});
+    res.json({ siparis });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "Sipariş kaydedilemedi." });
+  }
+});
+
 app.get("/api/masa/:masaNo", async (req, res) => {
   res.json(await masaSiparisleriniGetir(req.params.masaNo));
 });
@@ -90,6 +107,9 @@ app.get("/api/mutfak", async (req, res) => {
 // Aktif ürün kataloğu müşteri uygulamasına açıktır.
 app.get("/api/urunler", async (_req, res) => {
   res.json({ urunler: await urunleriGetir() });
+});
+app.get("/api/duyurular", async (_req, res) => {
+  res.json({ duyurular: await duyurulariGetir() });
 });
 
 app.post("/api/yerel-admin-kurulum", yerelAdminKurulum);
@@ -138,6 +158,12 @@ app.get("/api/admin/personeller", admin, guvenli(async () => ({ personeller: awa
 app.post("/api/admin/personeller", admin, guvenli(async (req) => ({ personel: await personelKaydet(req.body) })));
 app.post("/api/admin/personeller/:id/vardiya", admin, guvenli((req) => vardiyaDegistir(req.params.id, req.body.islem)));
 app.get("/api/admin/raporlar/satis", admin, guvenli((req) => satisRaporuGetir(req.query.gun)));
+app.get("/api/admin/duyurular", admin, guvenli(async () => ({ duyurular: await duyurulariGetir({ tumu: true }) })));
+app.post("/api/admin/duyurular", admin, guvenli(async (req) => {
+  const duyuru = await duyuruKaydet(req.body);
+  io.emit("duyurular-guncellendi", await duyurulariGetir());
+  return { duyuru };
+}));
 
 app.get("/", (req, res) => res.send("Burger Plus backend calisiyor (PostgreSQL)"));
 

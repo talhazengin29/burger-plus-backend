@@ -86,6 +86,23 @@ export async function tablolariHazirla() {
     )
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS kullanici_siparisleri (
+      id BIGSERIAL PRIMARY KEY,
+      kullanici_id INTEGER NOT NULL REFERENCES kullanicilar(id) ON DELETE CASCADE,
+      siparis_no TEXT NOT NULL,
+      masa_no TEXT,
+      tip TEXT NOT NULL,
+      urunler JSONB NOT NULL DEFAULT '[]'::jsonb,
+      tutar NUMERIC NOT NULL DEFAULT 0,
+      kazanilan_puan INTEGER NOT NULL DEFAULT 0,
+      durum TEXT NOT NULL DEFAULT 'hazirlaniyor',
+      tamamlandi BOOLEAN NOT NULL DEFAULT false,
+      olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (kullanici_id, siparis_no)
+    )
+  `);
+
   // --- Migration: mevcut tablolarda olusturma sütununu TIMESTAMPTZ'ye çevir ---
   // Eski kurulumda TIMESTAMP (timezone'suz) kaydedilmişse saat 3 saat kayıyordu.
   // TIMESTAMPTZ'ye çevirirken mevcut değerleri UTC kabul edip düzeltiyoruz.
@@ -346,6 +363,53 @@ export async function kullaniciProfilGuncelle(id, { email, telefon }) {
     [email.toLowerCase(), telefon, id]
   );
   return { kullanici: sonuc.rows[0] };
+}
+
+export async function kullaniciSiparisKaydet(kullaniciId, veri) {
+  const siparisNo = String(veri.siparisNo || veri.id || "").trim().slice(0, 100);
+  const tip = veri.tip === "masa" ? "masa" : "algotur";
+  const masaNo = tip === "masa" ? String(veri.masaNo || "").slice(0, 30) : null;
+  const urunler = Array.isArray(veri.urunler) ? veri.urunler : [];
+  const urunlerJson = JSON.stringify(urunler);
+  const tutar = Number(veri.tutar || 0);
+  const kazanilanPuan = Math.max(0, Math.floor(Number(veri.kazanilanPuan || 0)));
+  if (!siparisNo || !Number.isFinite(tutar) || tutar < 0) throw new Error("Geçersiz sipariş bilgisi.");
+  if (Buffer.byteLength(urunlerJson, "utf8") > 250_000) throw new Error("Sipariş içeriği çok büyük.");
+
+  const sonuc = await pool.query(
+    `INSERT INTO kullanici_siparisleri
+      (kullanici_id,siparis_no,masa_no,tip,urunler,tutar,kazanilan_puan,durum)
+     VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,'hazirlaniyor')
+     ON CONFLICT (kullanici_id,siparis_no) DO UPDATE SET
+       masa_no=EXCLUDED.masa_no, tip=EXCLUDED.tip, urunler=EXCLUDED.urunler,
+       tutar=EXCLUDED.tutar, kazanilan_puan=EXCLUDED.kazanilan_puan
+     RETURNING *`,
+    [kullaniciId, siparisNo, masaNo, tip, urunlerJson, tutar, kazanilanPuan]
+  );
+  return kullaniciSiparisiniDonustur(sonuc.rows[0]);
+}
+
+export async function kullaniciSiparisleriniGetir(kullaniciId) {
+  const sonuc = await pool.query(
+    `SELECT * FROM kullanici_siparisleri WHERE kullanici_id=$1 ORDER BY olusturma DESC LIMIT 200`,
+    [kullaniciId]
+  );
+  return sonuc.rows.map(kullaniciSiparisiniDonustur);
+}
+
+function kullaniciSiparisiniDonustur(siparis) {
+  return {
+    id: Number(siparis.id),
+    siparisNo: siparis.siparis_no,
+    masaNo: siparis.masa_no,
+    tip: siparis.tip,
+    urunler: Array.isArray(siparis.urunler) ? siparis.urunler : [],
+    tutar: Number(siparis.tutar),
+    kazanilanPuan: Number(siparis.kazanilan_puan),
+    durum: siparis.durum,
+    tamamlandi: siparis.tamamlandi,
+    tarih: siparis.olusturma,
+  };
 }
 
 export default pool;

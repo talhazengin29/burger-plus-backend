@@ -14,6 +14,14 @@ const BASLANGIC_URUNLERI = [
   [10,"Su",15,"İçecekler",500,"https://images.unsplash.com/photo-1616118132534-381148898bb4?w=400&h=400&fit=crop"],
   [11,"Soda",30,"İçecekler",200,"https://images.unsplash.com/photo-1625772299848-391b6a87d7b3?w=400&h=400&fit=crop"],
   [12,"Çay",20,"İçecekler",200,"https://images.unsplash.com/photo-1597481499750-3e6b22637e12?w=400&h=400&fit=crop"],
+  [13,"Trüflü Mushroom Burger",275,"Burgerler",220,"https://images.unsplash.com/photo-1550547660-d9450f859349?w=400&h=400&fit=crop"],
+  [14,"Acılı Mexican Burger",260,"Burgerler",200,"https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=400&h=400&fit=crop"],
+  [15,"Crispy Chicken Burger",220,"Burgerler",180,"https://images.unsplash.com/photo-1565299507177-b0ac66763828?w=400&h=400&fit=crop"],
+  [16,"BBQ Ranch Burger",285,"Burgerler",250,"https://images.unsplash.com/photo-1553979459-d2229ba7433b?w=400&h=400&fit=crop"],
+  [17,"Mozzarella Sticks",110,"Yan Lezzetler",180,"https://images.unsplash.com/photo-1531749668029-2db88e4276c7?w=400&h=400&fit=crop"],
+  [18,"Coleslaw Salata",70,"Yan Lezzetler",160,"https://images.unsplash.com/photo-1547592180-85f173990554?w=400&h=400&fit=crop"],
+  [19,"Şeftalili Ice Tea",50,"İçecekler",330,"https://images.unsplash.com/photo-1497534446932-c925b458314e?w=400&h=400&fit=crop"],
+  [20,"Çikolatalı Milkshake",95,"İçecekler",400,"https://images.unsplash.com/photo-1572490122747-3968b75cc699?w=400&h=400&fit=crop"],
 ];
 
 const BASLANGIC_MALZEMELERI = {
@@ -24,6 +32,14 @@ const BASLANGIC_MALZEMELERI = {
   5: ["Patates", "Ayçiçek yağı", "Tuz"],
   6: ["Soğan", "Galeta unu", "Un", "Baharatlar"],
   7: ["Kola"], 8: ["Limonata"], 9: ["Ayran"], 10: ["Su"], 11: ["Soda"], 12: ["Çay"],
+  13: ["Dana köfte", "Cheddar", "Mantar", "Trüf sos", "Marul"],
+  14: ["Dana köfte", "Cheddar", "Jalapeno", "Meksika sosu", "Marul"],
+  15: ["Çıtır tavuk", "Cheddar", "Coleslaw", "Ranch sos"],
+  16: ["Dana köfte", "Cheddar", "BBQ sos", "Ranch sos", "Çıtır soğan"],
+  17: ["Mozzarella", "Galeta unu", "Marinara sos"],
+  18: ["Lahana", "Havuç", "Yoğurtlu sos"],
+  19: ["Çay", "Şeftali", "Su"],
+  20: ["Süt", "Çikolata", "Dondurma"],
 };
 
 const sayi = (deger, varsayilan = 0) => {
@@ -98,6 +114,15 @@ export async function adminTablolariHazirla() {
       deger JSONB NOT NULL DEFAULT '{}'::jsonb,
       guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS duyurular (
+      id SERIAL PRIMARY KEY,
+      baslik TEXT NOT NULL,
+      mesaj TEXT NOT NULL,
+      hedef TEXT NOT NULL DEFAULT '/anasayfa',
+      aktif BOOLEAN NOT NULL DEFAULT true,
+      olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 
   await pool.query(`
@@ -113,7 +138,14 @@ export async function adminTablolariHazirla() {
       [id, ad, fiyat, kategori, temelMiktar, gorsel]
     );
   }
-  await pool.query("SELECT setval('urunler_id_seq', GREATEST((SELECT COALESCE(MAX(id),1) FROM urunler), 12))");
+  await pool.query("SELECT setval('urunler_id_seq', GREATEST((SELECT COALESCE(MAX(id),1) FROM urunler), 20))");
+
+  for (const [id, malzemeler] of Object.entries(BASLANGIC_MALZEMELERI)) {
+    await pool.query(
+      "UPDATE urunler SET malzemeler=$1::jsonb WHERE id=$2 AND malzemeler='[]'::jsonb",
+      [JSON.stringify(malzemeler), id]
+    );
+  }
 
   // Demo başlangıç verileri yalnızca bir defa eklenir. Sonraki başlangıçlarda
   // adminin eklediği/değiştirdiği kayıtlar korunur ve veriler çoğalmaz.
@@ -251,6 +283,28 @@ export async function vardiyaDegistir(personelId, islem) {
       [personelId]
     );
   }
+}
+
+export async function duyurulariGetir({ tumu = false } = {}) {
+  const sonuc = await pool.query(
+    `SELECT id,baslik,mesaj,hedef,aktif,olusturma FROM duyurular
+     ${tumu ? "" : "WHERE aktif=true"}
+     ORDER BY olusturma DESC LIMIT 30`
+  );
+  return sonuc.rows;
+}
+
+export async function duyuruKaydet(veri) {
+  const baslik = String(veri.baslik || "").trim().slice(0, 100);
+  const mesaj = String(veri.mesaj || "").trim().slice(0, 600);
+  const hamHedef = String(veri.hedef || "/anasayfa").trim();
+  const hedef = hamHedef.startsWith("/") && !hamHedef.startsWith("//") ? hamHedef.slice(0, 160) : "/anasayfa";
+  if (!baslik || !mesaj) throw new Error("Duyuru başlığı ve mesajı zorunludur.");
+  const sonuc = await pool.query(
+    `INSERT INTO duyurular (baslik,mesaj,hedef,aktif) VALUES ($1,$2,$3,true) RETURNING *`,
+    [baslik, mesaj, hedef]
+  );
+  return sonuc.rows[0];
 }
 
 export async function dashboardGetir() {
