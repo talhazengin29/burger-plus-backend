@@ -36,6 +36,7 @@ import {
   ilkYerelAdminOlustur,
   yerelAdminKurulumGerekli,
   urunleriGetir,
+  onerileriGetir,
   urunKaydet,
   urunAktiflikDegistir,
   urunArsivle,
@@ -190,6 +191,11 @@ app.get("/api/mutfak", rolMiddleware(["mutfak", "salon", "kasiyer"]), async (req
 // Aktif ürün kataloğu müşteri uygulamasına açıktır.
 app.get("/api/urunler", async (_req, res) => {
   res.json({ urunler: await urunleriGetir() });
+});
+app.get("/api/oneriler", async (req, res) => {
+  const urunIdleri = String(req.query.urunler || "")
+    .split(",").map(Number).filter((id) => Number.isInteger(id) && id > 0).slice(0, 30);
+  res.json({ urunler: await onerileriGetir(urunIdleri) });
 });
 app.get("/api/kategoriler", async (_req, res) => {
   res.json({ kategoriler: await kategorileriGetir() });

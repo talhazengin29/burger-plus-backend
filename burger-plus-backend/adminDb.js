@@ -239,6 +239,8 @@ export async function adminTablolariHazirla() {
       urun_tipi TEXT NOT NULL DEFAULT 'burger',
       boyut_secenekleri JSONB NOT NULL DEFAULT '[]'::jsonb,
       menu_yapisi JSONB,
+      onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb,
+      populer BOOLEAN NOT NULL DEFAULT false,
       arsivli BOOLEAN NOT NULL DEFAULT false,
       aktif BOOLEAN NOT NULL DEFAULT true,
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -310,6 +312,8 @@ export async function adminTablolariHazirla() {
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS urun_tipi TEXT NOT NULL DEFAULT 'burger'");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS boyut_secenekleri JSONB NOT NULL DEFAULT '[]'::jsonb");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS menu_yapisi JSONB");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS populer BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   for (const [ad, gorsel, sira] of BASLANGIC_KATEGORILERI) {
     await pool.query(
@@ -333,6 +337,35 @@ export async function adminTablolariHazirla() {
     await pool.query(
       "INSERT INTO sistem_ayarlari (anahtar,deger) VALUES ('manuel_katalog_v2',$1::jsonb) ON CONFLICT DO NOTHING",
       [JSON.stringify({ tarih: new Date().toISOString(), aciklama: "Katalog manuel yönetime geçirildi" })]
+    );
+  }
+  const onerilerKuruldu = await pool.query("SELECT 1 FROM sistem_ayarlari WHERE anahtar='upsell_onerileri_v1'");
+  if (!onerilerKuruldu.rows.length) {
+    await pool.query(`
+      UPDATE urunler kaynak
+      SET onerilen_urunler = COALESCE((
+        SELECT jsonb_agg(hedef.id)
+        FROM (
+          SELECT hedef.id
+          FROM urunler hedef
+          WHERE hedef.aktif=true AND hedef.arsivli=false AND hedef.id <> kaynak.id
+            AND (
+              (kaynak.urun_tipi='burger' AND hedef.urun_tipi IN ('yan_lezzet','icecek'))
+              OR (kaynak.urun_tipi='yan_lezzet' AND hedef.urun_tipi='icecek')
+            )
+          ORDER BY CASE
+            WHEN kaynak.urun_tipi='burger' AND hedef.urun_tipi='yan_lezzet' THEN 0
+            ELSE 1
+          END, hedef.id
+          LIMIT 2
+        ) hedef
+      ), '[]'::jsonb)
+      WHERE kaynak.aktif=true AND kaynak.arsivli=false
+        AND (kaynak.onerilen_urunler IS NULL OR kaynak.onerilen_urunler='[]'::jsonb)
+    `);
+    await pool.query(
+      "INSERT INTO sistem_ayarlari (anahtar,deger) VALUES ('upsell_onerileri_v1',$1::jsonb) ON CONFLICT DO NOTHING",
+      [JSON.stringify({ tarih: new Date().toISOString() })]
     );
   }
   await pool.query("SELECT setval('urunler_id_seq', GREATEST((SELECT COALESCE(MAX(id),1) FROM urunler), 1))");
@@ -381,6 +414,8 @@ function urunDonustur(u) {
     urunTipi: u.urun_tipi || "burger",
     boyutSecenekleri: u.boyut_secenekleri || [],
     menuYapisi: u.menu_yapisi || null,
+    onerilenUrunler: Array.isArray(u.onerilen_urunler) ? u.onerilen_urunler.map(Number).filter(Number.isInteger) : [],
+    populer: u.populer === true,
     aktif: u.aktif,
   };
   if (u.gramaj_opsiyonu != null) urun.gramajOpsiyonu = u.gramaj_opsiyonu;
@@ -470,6 +505,7 @@ export async function urunKaydet(veri) {
   const gramajOpsiyonu = urunTipi === "burger" ? gramajOpsiyonunuDogrula(veri.gramajOpsiyonu, temelMiktar) : null;
   const boyutSecenekleri = boyutSecenekleriniDogrula(veri.boyutSecenekleri, urunTipi);
   const menuYapisi = await menuYapisiniDogrula(veri.menuYapisi, urunTipi);
+  const onerilenUrunler = await onerilenUrunleriDogrula(veri.onerilenUrunler, veri.id);
   const alanlar = [
     String(veri.ad || "").trim().slice(0, 120),
     sayi(veri.fiyat),
@@ -483,7 +519,9 @@ export async function urunKaydet(veri) {
     urunTipi,
     JSON.stringify(boyutSecenekleri),
     menuYapisi == null ? null : JSON.stringify(menuYapisi),
+    JSON.stringify(onerilenUrunler),
     veri.aktif !== false,
+    veri.populer === true,
   ];
   if (!alanlar[0] || alanlar[1] < 0) throw new Error("Ürün adı ve geçerli fiyat zorunludur.");
   await pool.query(
@@ -496,17 +534,48 @@ export async function urunKaydet(veri) {
         `UPDATE urunler SET ad=$1, fiyat=$2, kategori=$3, gorsel=$4, aciklama=$5,
           malzemeler=$6::jsonb, alerjenler=$7::jsonb, temel_miktar=$8,
           gramaj_opsiyonu=$9::jsonb, urun_tipi=$10, boyut_secenekleri=$11::jsonb,
-          menu_yapisi=$12::jsonb, aktif=$13, arsivli=false, guncelleme=NOW()
-         WHERE id=$14 AND arsivli=false RETURNING *`, [...alanlar, veri.id]
+          menu_yapisi=$12::jsonb, onerilen_urunler=$13::jsonb, aktif=$14, populer=$15, arsivli=false, guncelleme=NOW()
+         WHERE id=$16 AND arsivli=false RETURNING *`, [...alanlar, veri.id]
       )
     : await pool.query(
         `INSERT INTO urunler
           (ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,temel_miktar,gramaj_opsiyonu,
-           urun_tipi,boyut_secenekleri,menu_yapisi,aktif,arsivli)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13,false) RETURNING *`, alanlar
+           urun_tipi,boyut_secenekleri,menu_yapisi,onerilen_urunler,aktif,populer,arsivli)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14,$15,false) RETURNING *`, alanlar
       );
   if (!sonuc.rows.length) throw new Error("Ürün bulunamadı veya arşivlenmiş.");
   return urunDonustur(sonuc.rows[0]);
+}
+
+async function onerilenUrunleriDogrula(ham, kendiId) {
+  if (ham == null) return [];
+  if (!Array.isArray(ham)) throw new Error("Önerilen ürünler listesi geçersiz.");
+  const kendiUrunId = Number(kendiId);
+  const idler = [...new Set(ham.map(Number).filter(Number.isInteger))].filter((id) => id > 0 && id !== kendiUrunId);
+  if (idler.length > 5) throw new Error("En fazla 5 önerilen ürün seçebilirsin.");
+  if (!idler.length) return [];
+  const sonuc = await pool.query(
+    "SELECT id FROM urunler WHERE id=ANY($1::int[]) AND aktif=true AND arsivli=false",
+    [idler]
+  );
+  const gecerliIdler = new Set(sonuc.rows.map((urun) => Number(urun.id)));
+  if (gecerliIdler.size !== idler.length) throw new Error("Önerilen ürünlerden biri geçersiz veya satışta değil.");
+  return idler;
+}
+
+export async function onerileriGetir(sepetUrunIdleri) {
+  const sepetIdleri = [...new Set((Array.isArray(sepetUrunIdleri) ? sepetUrunIdleri : []).map(Number).filter((id) => Number.isInteger(id) && id > 0))].slice(0, 30);
+  if (!sepetIdleri.length) return [];
+  const sonuc = await pool.query(
+    "SELECT onerilen_urunler FROM urunler WHERE id=ANY($1::int[]) AND aktif=true AND arsivli=false",
+    [sepetIdleri]
+  );
+  const adayIdler = [...new Set(sonuc.rows.flatMap((urun) => Array.isArray(urun.onerilen_urunler) ? urun.onerilen_urunler : []).map(Number).filter(Number.isInteger))]
+    .filter((id) => !sepetIdleri.includes(id));
+  if (!adayIdler.length) return [];
+  const katalog = await urunleriGetir();
+  const urunHaritasi = new Map(katalog.map((urun) => [Number(urun.id), urun]));
+  return adayIdler.map((id) => urunHaritasi.get(id)).filter(Boolean).slice(0, 3);
 }
 
 export async function urunAktiflikDegistir(id, aktif) {
