@@ -24,6 +24,12 @@ const BASLANGIC_URUNLERI = [
   [20,"Çikolatalı Milkshake",95,"İçecekler",400,"https://images.unsplash.com/photo-1572490122747-3968b75cc699?w=400&h=400&fit=crop"],
 ];
 
+const BASLANGIC_KATEGORILERI = [
+  ["Burgerler", "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=160&h=160&fit=crop", 10],
+  ["Yan Lezzetler", "https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=160&h=160&fit=crop", 20],
+  ["İçecekler", "https://images.unsplash.com/photo-1554866585-cd94860890b7?w=160&h=160&fit=crop", 30],
+];
+
 const BASLANGIC_MALZEMELERI = {
   1: ["Dana köfte", "Cheddar", "Marul", "Domates", "Soğan", "Turşu", "Özel sos"],
   2: ["Dana köfte", "Cheddar", "Çıtır soğan", "BBQ sos", "Marul", "Turşu"],
@@ -111,6 +117,16 @@ export async function yerelAdminKurulumGerekli() {
 
 export async function adminTablolariHazirla() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS kategoriler (
+      id SERIAL PRIMARY KEY,
+      ad TEXT NOT NULL UNIQUE,
+      gorsel TEXT,
+      sira INTEGER NOT NULL DEFAULT 0,
+      aktif BOOLEAN NOT NULL DEFAULT true,
+      olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS urunler (
       id SERIAL PRIMARY KEY,
       ad TEXT NOT NULL,
@@ -168,8 +184,26 @@ export async function adminTablolariHazirla() {
     ALTER TABLE siparis_kalemleri
     ADD COLUMN IF NOT EXISTS siparis_no TEXT
   `);
+  await pool.query("ALTER TABLE personeller ADD COLUMN IF NOT EXISTS kullanici_id INTEGER");
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='personeller_kullanici_id_fkey') THEN
+        ALTER TABLE personeller ADD CONSTRAINT personeller_kullanici_id_fkey
+          FOREIGN KEY (kullanici_id) REFERENCES kullanicilar(id) ON DELETE SET NULL;
+      END IF;
+    END $$;
+    CREATE UNIQUE INDEX IF NOT EXISTS personeller_kullanici_id_unique
+      ON personeller(kullanici_id) WHERE kullanici_id IS NOT NULL;
+  `);
 
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS besin_degerleri JSONB");
+  for (const [ad, gorsel, sira] of BASLANGIC_KATEGORILERI) {
+    await pool.query(
+      `INSERT INTO kategoriler (ad,gorsel,sira) VALUES ($1,$2,$3)
+       ON CONFLICT (ad) DO UPDATE SET gorsel=COALESCE(kategoriler.gorsel,EXCLUDED.gorsel)`,
+      [ad, gorsel, sira]
+    );
+  }
   for (const [id, ad, fiyat, kategori, temelMiktar, gorsel] of BASLANGIC_URUNLERI) {
     await pool.query(
       `INSERT INTO urunler (id,ad,fiyat,kategori,temel_miktar,gorsel)
@@ -178,6 +212,14 @@ export async function adminTablolariHazirla() {
     );
   }
   await pool.query("SELECT setval('urunler_id_seq', GREATEST((SELECT COALESCE(MAX(id),1) FROM urunler), 20))");
+  await pool.query(`
+    INSERT INTO kategoriler (ad,gorsel,sira)
+    SELECT u.kategori, MIN(u.gorsel), 100 + ROW_NUMBER() OVER (ORDER BY u.kategori) * 10
+    FROM urunler u
+    WHERE BTRIM(u.kategori) <> ''
+    GROUP BY u.kategori
+    ON CONFLICT (ad) DO NOTHING
+  `);
 
   // Yeni eklenen başlangıç ürünleri eski kurulumlarda da içerikleriyle görünür.
   for (const [id, malzemeler] of Object.entries(BASLANGIC_MALZEMELERI)) {
@@ -254,6 +296,72 @@ export async function urunleriGetir({ tumu = false } = {}) {
   return sonuc.rows.map(urunDonustur);
 }
 
+function kategoriDonustur(kategori) {
+  return {
+    id: kategori.id,
+    ad: kategori.ad,
+    gorsel: kategori.gorsel,
+    sira: Number(kategori.sira || 0),
+    aktif: kategori.aktif,
+  };
+}
+
+export async function kategorileriGetir({ tumu = false } = {}) {
+  const sonuc = await pool.query(`
+    SELECT id,ad,gorsel,sira,aktif
+    FROM kategoriler
+    ${tumu ? "" : "WHERE aktif = true"}
+    ORDER BY sira, ad
+  `);
+  return sonuc.rows.map(kategoriDonustur);
+}
+
+export async function kategoriKaydet(veri) {
+  const ad = String(veri.ad || "").trim().replace(/\s+/g, " ").slice(0, 60);
+  const gorsel = String(veri.gorsel || "").trim().slice(0, 1000);
+  const sira = Math.floor(sayi(veri.sira, 0));
+  if (ad.length < 2 || /[\u0000-\u001F\u007F]/.test(ad)) throw new Error("Kategori adı en az 2 karakter olmalıdır.");
+  if (ad.toLocaleLowerCase("tr") === "tümü".toLocaleLowerCase("tr")) throw new Error("Tümü adı uygulama tarafından otomatik oluşturulur.");
+  if (!gorsel) throw new Error("Kategori görseli zorunludur.");
+  try {
+    const url = new URL(gorsel);
+    if (!["http:", "https:"].includes(url.protocol)) throw new Error();
+  } catch {
+    throw new Error("Kategori görseli geçerli bir http/https adresi olmalıdır.");
+  }
+  if (!Number.isInteger(sira) || sira < 0 || sira > 999) throw new Error("Kategori sırası 0–999 arasında olmalıdır.");
+
+  const istemci = await pool.connect();
+  try {
+    await istemci.query("BEGIN");
+    let sonuc;
+    if (veri.id) {
+      const mevcut = await istemci.query("SELECT ad FROM kategoriler WHERE id=$1 FOR UPDATE", [veri.id]);
+      if (!mevcut.rows.length) throw new Error("Kategori bulunamadı.");
+      sonuc = await istemci.query(
+        "UPDATE kategoriler SET ad=$1,gorsel=$2,sira=$3,guncelleme=NOW() WHERE id=$4 RETURNING *",
+        [ad, gorsel, sira, veri.id]
+      );
+      if (mevcut.rows[0].ad !== ad) {
+        await istemci.query("UPDATE urunler SET kategori=$1,guncelleme=NOW() WHERE kategori=$2", [ad, mevcut.rows[0].ad]);
+      }
+    } else {
+      sonuc = await istemci.query(
+        "INSERT INTO kategoriler (ad,gorsel,sira,aktif) VALUES ($1,$2,$3,true) RETURNING *",
+        [ad, gorsel, sira]
+      );
+    }
+    await istemci.query("COMMIT");
+    return kategoriDonustur(sonuc.rows[0]);
+  } catch (hata) {
+    await istemci.query("ROLLBACK");
+    if (hata.code === "23505") throw new Error("Bu kategori adı zaten kullanılıyor.");
+    throw hata;
+  } finally {
+    istemci.release();
+  }
+}
+
 export async function urunKaydet(veri) {
   const temelMiktar = veri.temelMiktar === "" || veri.temelMiktar == null ? null : sayi(veri.temelMiktar);
   const gramajOpsiyonu = gramajOpsiyonunuDogrula(veri.gramajOpsiyonu, temelMiktar);
@@ -270,6 +378,10 @@ export async function urunKaydet(veri) {
     veri.aktif !== false,
   ];
   if (!alanlar[0] || alanlar[1] < 0) throw new Error("Ürün adı ve geçerli fiyat zorunludur.");
+  await pool.query(
+    "INSERT INTO kategoriler (ad,sira,aktif) VALUES ($1,999,true) ON CONFLICT (ad) DO NOTHING",
+    [alanlar[2]]
+  );
 
   const sonuc = veri.id
     ? await pool.query(
@@ -309,22 +421,73 @@ export async function personelleriGetir() {
 }
 
 export async function personelKaydet(veri) {
-  const alanlar = [
-    String(veri.ad || "").trim().slice(0, 80), String(veri.soyad || "").trim().slice(0, 80),
-    String(veri.rol || "personel").slice(0, 40), veri.email || null, veri.telefon || null,
-    sayi(veri.saatlikUcret),
-  ];
-  if (!alanlar[0] || !alanlar[1]) throw new Error("Personel adı ve soyadı zorunludur.");
-  const sonuc = veri.id
-    ? await pool.query(
-        `UPDATE personeller SET ad=$1,soyad=$2,rol=$3,email=$4,telefon=$5,saatlik_ucret=$6
-         WHERE id=$7 RETURNING *`, [...alanlar, veri.id]
-      )
-    : await pool.query(
-        `INSERT INTO personeller (ad,soyad,rol,email,telefon,saatlik_ucret)
-         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`, alanlar
+  const ad = String(veri.ad || "").trim().slice(0, 80);
+  const soyad = String(veri.soyad || "").trim().slice(0, 80);
+  const rolEtiketi = String(veri.rol || "").trim();
+  const rolHaritasi = { "Mutfak": "mutfak", "Salon": "salon", "Kasiyer": "kasiyer", "Yönetici": "admin" };
+  const hesapRolu = rolHaritasi[rolEtiketi];
+  const email = String(veri.email || "").trim().toLowerCase().slice(0, 254);
+  const telefon = String(veri.telefon || "").trim().slice(0, 20) || null;
+  const sifre = String(veri.sifre || "");
+  if (!ad || !soyad || !hesapRolu) throw new Error("Personel adı, soyadı ve geçerli rol zorunludur.");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Personel girişi için geçerli e-posta zorunludur.");
+  if (sifre && (sifre.length < 8 || sifre.length > 72)) throw new Error("Şifre 8–72 karakter arasında olmalıdır.");
+
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    let mevcut = null;
+    if (veri.id) {
+      const sonuc = await baglanti.query("SELECT * FROM personeller WHERE id=$1 FOR UPDATE", [veri.id]);
+      mevcut = sonuc.rows[0] || null;
+      if (!mevcut) throw new Error("Personel bulunamadı.");
+    }
+    if (!mevcut?.kullanici_id && !sifre) throw new Error("Personel hesabı için en az 8 karakterli şifre belirleyin.");
+
+    let kullaniciId = mevcut?.kullanici_id || null;
+    if (kullaniciId) {
+      const parametreler = [ad, soyad, email, telefon, hesapRolu, kullaniciId];
+      if (sifre) {
+        parametreler.push(await bcrypt.hash(sifre, 12));
+        await baglanti.query(
+          `UPDATE kullanicilar SET ad=$1,soyad=$2,email=$3,telefon=$4,rol=$5,sifre_hash=$7 WHERE id=$6`,
+          parametreler
+        );
+      } else {
+        await baglanti.query(
+          `UPDATE kullanicilar SET ad=$1,soyad=$2,email=$3,telefon=$4,rol=$5 WHERE id=$6`,
+          parametreler
+        );
+      }
+    } else {
+      const sifreHash = await bcrypt.hash(sifre, 12);
+      const hesap = await baglanti.query(
+        `INSERT INTO kullanicilar (ad,soyad,email,telefon,sifre_hash,rol,davet_kodu)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+        [ad, soyad, email, telefon, sifreHash, hesapRolu, davetKoduUret()]
       );
-  return sonuc.rows[0];
+      kullaniciId = hesap.rows[0].id;
+    }
+
+    const alanlar = [ad, soyad, rolEtiketi, email, telefon, sayi(veri.saatlikUcret), kullaniciId];
+    const sonuc = mevcut
+      ? await baglanti.query(
+          `UPDATE personeller SET ad=$1,soyad=$2,rol=$3,email=$4,telefon=$5,saatlik_ucret=$6,kullanici_id=$7
+           WHERE id=$8 RETURNING *`, [...alanlar, veri.id]
+        )
+      : await baglanti.query(
+          `INSERT INTO personeller (ad,soyad,rol,email,telefon,saatlik_ucret,kullanici_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`, alanlar
+        );
+    await baglanti.query("COMMIT");
+    return sonuc.rows[0];
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    if (e.code === "23505") throw new Error("Bu e-posta başka bir hesapta kullanılıyor.");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
 }
 
 export async function vardiyaDegistir(personelId, islem) {

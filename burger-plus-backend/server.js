@@ -10,16 +10,16 @@ import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
-import {
+import helmet from "helmet";
+import { rateLimit } from "express-rate-limit";
+import pool, {
   tablolariHazirla,
   masaSiparisleriniGetir,
   kalemEkle,
   masaDurumGuncelle,
   tumAcikMasalar,
   masaKapat,
-  kullaniciPuanGuncelle,
   kullaniciProfilGuncelle,
-  kullaniciSiparisKaydet,
   kullaniciSiparisleriniGetir,
   davetOzetiniGetir,
   odemeTaslagiOlustur,
@@ -38,6 +38,8 @@ import {
   urunleriGetir,
   urunKaydet,
   urunAktiflikDegistir,
+  kategorileriGetir,
+  kategoriKaydet,
   personelleriGetir,
   personelKaydet,
   vardiyaDegistir,
@@ -46,29 +48,69 @@ import {
   duyurulariGetir,
   duyuruKaydet,
 } from "./adminDb.js";
-import { kayitOl, girisYap, korumaliMiddleware, adminMiddleware, opsiyonelKullaniciMiddleware } from "./auth.js";
+import {
+  kayitOl, girisYap, korumaliMiddleware, adminMiddleware, rolMiddleware,
+  opsiyonelKullaniciMiddleware, tokenDogrula,
+} from "./auth.js";
+import {
+  sadakatTablolariHazirla, sadakatOzetiniGetir, puanlaOdulSatinAl,
+  kullaniciOdulunuSipariseDonustur,
+} from "./sadakatDb.js";
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+app.disable("x-powered-by");
+const URETIM = process.env.NODE_ENV === "production";
+if (URETIM) app.set("trust proxy", 1);
+function originiNormallestir(origin) {
+  const ham = String(origin || "").trim().replace(/\/$/, "");
+  if (!ham) return "";
+  if (/^https?:\/\//i.test(ham)) return ham;
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(ham)) return `http://${ham}`;
+  return `https://${ham}`;
+}
+const izinliOriginler = new Set(
+  [process.env.FRONTEND_URL, ...(process.env.CORS_ORIGINS || "").split(",")]
+    .map(originiNormallestir)
+    .filter(Boolean)
+);
+if (!URETIM) {
+  ["http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173", "http://127.0.0.1:5174"]
+    .forEach((origin) => izinliOriginler.add(origin));
+}
+function originIzinli(origin) {
+  return !origin || izinliOriginler.has(originiNormallestir(origin));
+}
+const corsAyarlari = {
+  origin(origin, callback) {
+    if (originIzinli(origin)) return callback(null, true);
+    callback(new Error("Bu origin icin CORS izni yok."));
+  },
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(cors(corsAyarlari));
+app.use(express.json({ limit: "100kb" }));
+app.use(express.urlencoded({ extended: false, limit: "20kb" }));
+app.use("/api", rateLimit({ windowMs: 60_000, limit: 180, standardHeaders: "draft-8", legacyHeaders: false }));
+const kimlikLimiti = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false });
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: "*" },
+  cors: corsAyarlari,
 });
 
 // --- HTTP API ---
 
 // Kayit ol
-app.post("/api/kayit", async (req, res) => {
+app.post("/api/kayit", kimlikLimiti, async (req, res) => {
   const sonuc = await kayitOl(req.body);
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
 
 // Giris yap
-app.post("/api/giris", async (req, res) => {
+app.post("/api/giris", kimlikLimiti, async (req, res) => {
   const sonuc = await girisYap(req.body);
   if (sonuc.hata) return res.status(401).json(sonuc);
   res.json(sonuc);
@@ -87,16 +129,9 @@ app.get("/api/davetim", korumaliMiddleware(), async (req, res) => {
   }
 });
 
-// Puan guncelle (odeme sonrasi; sadece giris yapmis kullanici)
-app.post("/api/puan", korumaliMiddleware(), async (req, res) => {
-  const { puan } = req.body;
-  await kullaniciPuanGuncelle(req.kullanici.id, puan);
-  res.json({ puan });
-});
-
 // Profil guncelle (email + telefon; ad/soyad/cinsiyet degismez)
 app.post("/api/profil", korumaliMiddleware(), async (req, res) => {
-  const { email, telefon } = req.body;
+  const { email, telefon } = req.body || {};
   const sonuc = await kullaniciProfilGuncelle(req.kullanici.id, { email, telefon });
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
@@ -106,25 +141,54 @@ app.get("/api/siparislerim", korumaliMiddleware(), async (req, res) => {
   res.json({ siparisler: await kullaniciSiparisleriniGetir(req.kullanici.id) });
 });
 
-app.post("/api/siparislerim", korumaliMiddleware(), async (req, res) => {
+app.get("/api/sadakat", korumaliMiddleware(), async (req, res) => {
   try {
-    const siparis = await kullaniciSiparisKaydet(req.kullanici.id, req.body || {});
-    res.json({ siparis });
+    res.json({ sadakat: await sadakatOzetiniGetir(pool, req.kullanici.id) });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Sipariş kaydedilemedi." });
+    res.status(400).json({ hata: e.message || "Sadakat bilgileri alinamadi." });
+  }
+});
+
+app.post("/api/sadakat/oduller/:id/satin-al", korumaliMiddleware(), async (req, res) => {
+  try {
+    await puanlaOdulSatinAl(pool, req.kullanici.id, req.params.id, req.body?.istekAnahtari);
+    res.json({ sadakat: await sadakatOzetiniGetir(pool, req.kullanici.id) });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "Odul alinamadi." });
+  }
+});
+
+app.post("/api/sadakat/hediyeler/:id/kullan", korumaliMiddleware(), async (req, res) => {
+  try {
+    const kisiAdi = `${req.kullanici.ad} ${req.kullanici.soyad}`.trim();
+    const odeme = await kullaniciOdulunuSipariseDonustur(
+      pool, req.kullanici.id, req.params.id, req.body?.masaNo, kisiAdi
+    );
+    await onaylananOdemeyiMutfagaAktar(odeme);
+    res.json({
+      odeme: { ...odeme, mutfagaAktarildi: true },
+      sadakat: await sadakatOzetiniGetir(pool, req.kullanici.id),
+    });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "Hediye kullanilamadi." });
   }
 });
 
 app.get("/api/masa/:masaNo", async (req, res) => {
-  res.json(await masaSiparisleriniGetir(req.params.masaNo));
+  const masaNo = guvenliMasaNo(req.params.masaNo);
+  if (!masaNo) return res.status(400).json({ hata: "Masa numarasi gecersiz." });
+  res.json(await masaSiparisleriniGetir(masaNo));
 });
 
-app.get("/api/mutfak", async (req, res) => {
+app.get("/api/mutfak", rolMiddleware(["mutfak", "salon", "kasiyer"]), async (req, res) => {
   res.json(await tumAcikMasalar());
 });
 // Aktif ürün kataloğu müşteri uygulamasına açıktır.
 app.get("/api/urunler", async (_req, res) => {
   res.json({ urunler: await urunleriGetir() });
+});
+app.get("/api/kategoriler", async (_req, res) => {
+  res.json({ kategoriler: await kategorileriGetir() });
 });
 app.get("/api/duyurular", async (_req, res) => {
   res.json({ duyurular: await duyurulariGetir() });
@@ -153,8 +217,8 @@ app.post("/api/odeme/taslak", opsiyonelKullaniciMiddleware(), async (req, res) =
 // Yalnızca geliştirmede gerçek ödeme sağlayıcısı yerine akışı test eder.
 // Render/production ortamında kapalıdır; İyzico sonucu bu endpointin yerini alır.
 app.post("/api/odeme/:id/simulasyon-onay", opsiyonelKullaniciMiddleware(), async (req, res) => {
-  if (process.env.NODE_ENV === "production" || process.env.ODEME_SIMULASYONU === "kapali") {
-    return res.status(403).json({ hata: "Test ödeme onayı canlı ortamda kapalıdır." });
+  if (URETIM || process.env.ODEME_SIMULASYON_AKTIF !== "true") {
+    return res.status(404).json({ hata: "Kaynak bulunamadi." });
   }
   try {
     const sonuc = await odemeSimulasyonOnayla(req.params.id, req.kullanici?.id || null);
@@ -170,6 +234,7 @@ app.post("/api/odeme/:id/iyzico-baslat", opsiyonelKullaniciMiddleware(), async (
   try {
     const odeme = await odemeGetir(req.params.id);
     if (!odeme) return res.status(404).json({ hata: "Ödeme taslağı bulunamadı." });
+    if (odeme.kullaniciId && !req.kullanici) return res.status(401).json({ hata: "Bu ödeme için giriş gerekli." });
     if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
       return res.status(403).json({ hata: "Bu ödeme taslağı başka bir hesaba ait." });
     }
@@ -217,6 +282,7 @@ app.get("/api/odeme/iyzico/:yanlisHost/odeme-basarili", (req, res) => {
 app.get("/api/odeme/:id/sonuc", opsiyonelKullaniciMiddleware(), async (req, res) => {
   const odeme = await odemeGetir(req.params.id);
   if (!odeme) return res.status(404).json({ hata: "Ödeme bulunamadı." });
+  if (odeme.kullaniciId && !req.kullanici) return res.status(401).json({ hata: "Bu ödeme için giriş gerekli." });
   if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
     return res.status(403).json({ hata: "Bu ödeme başka bir hesaba ait." });
   }
@@ -265,6 +331,13 @@ app.patch("/api/admin/urunler/:id/aktif", admin, guvenli(async (req) => {
   await urunAktiflikDegistir(req.params.id, req.body.aktif);
   io.emit("urunler-guncellendi", await urunleriGetir());
 }));
+app.get("/api/admin/kategoriler", admin, guvenli(async () => ({ kategoriler: await kategorileriGetir({ tumu: true }) })));
+app.post("/api/admin/kategoriler", admin, guvenli(async (req) => {
+  const kategori = await kategoriKaydet(req.body);
+  io.emit("kategoriler-guncellendi", await kategorileriGetir());
+  io.emit("urunler-guncellendi", await urunleriGetir());
+  return { kategori };
+}));
 app.get("/api/admin/personeller", admin, guvenli(async () => ({ personeller: await personelleriGetir() })));
 app.post("/api/admin/personeller", admin, guvenli(async (req) => ({ personel: await personelKaydet(req.body) })));
 app.post("/api/admin/personeller/:id/vardiya", admin, guvenli((req) => vardiyaDegistir(req.params.id, req.body.islem)));
@@ -291,17 +364,6 @@ async function onaylananOdemeyiMutfagaAktar(odeme) {
         odeme.siparisNo, odeme.id, kalemNo
       );
     }
-    if (odeme.kullaniciId) {
-      await kullaniciSiparisKaydet(odeme.kullaniciId, {
-        id: odeme.siparisNo,
-        siparisNo: odeme.siparisNo,
-        masaNo: odeme.masaNo,
-        tip: odeme.tip,
-        urunler: odeme.urunler,
-        tutar: odeme.tutar,
-        kazanilanPuan: odeme.kazanilanPuan,
-      });
-    }
     await odemeMutfagaAktarildi(odeme.id);
     const tumMasalar = await tumAcikMasalar();
     io.to(`masa-${masaNo}`).emit("masa-guncellendi", await masaSiparisleriniGetir(masaNo));
@@ -327,16 +389,43 @@ function masaSirayaAl(masaNo, islem) {
   return sonraki;
 }
 
+function guvenliMasaNo(masaNo) {
+  const deger = String(masaNo || "").trim();
+  return /^[A-Za-z0-9_-]{1,30}$/.test(deger) ? deger : null;
+}
+
+function socketRoluVar(socket, roller) {
+  return socket.kullanici?.rol === "admin" || roller.includes(socket.kullanici?.rol);
+}
+
+io.use(async (socket, sonraki) => {
+  try {
+    const token = String(socket.handshake.auth?.token || "").trim();
+    socket.kullanici = token ? await tokenDogrula(token) : null;
+    if (token && !socket.kullanici) return sonraki(new Error("Oturum gecersiz."));
+    sonraki();
+  } catch {
+    sonraki(new Error("Oturum dogrulanamadi."));
+  }
+});
+
 io.on("connection", (socket) => {
   console.log("Baglandi:", socket.id);
 
-  socket.on("masaya-katil", async (masaNo) => {
+  socket.on("masaya-katil", async (gelenMasaNo) => {
+    const masaNo = guvenliMasaNo(gelenMasaNo);
+    if (!masaNo) return;
     socket.join(`masa-${masaNo}`);
     socket.emit("masa-guncellendi", await masaSiparisleriniGetir(masaNo));
     console.log(`${socket.id} -> masa-${masaNo}`);
   });
 
   socket.on("urun-ekle", ({ masaNo, urun, kisiAdi, secimler, haricMalzemeler, siparisNo }, tamamlandi) => {
+    masaNo = guvenliMasaNo(masaNo);
+    if (!masaNo || process.env.LEGACY_SOCKET_SIPARIS_AKTIF !== "true" || !socketRoluVar(socket, ["mutfak", "salon", "kasiyer"])) {
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: "Bu siparis yolu kullanima kapali." });
+      return;
+    }
     masaSirayaAl(masaNo, async () => {
       const guncel = await kalemEkle(
         masaNo, urun, kisiAdi, secimler || urun?.secimler || {},
@@ -354,6 +443,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("mutfaga-katil", async () => {
+    if (!socketRoluVar(socket, ["mutfak"])) return;
     socket.join("mutfak");
     socket.emit("mutfak-guncellendi", await tumAcikMasalar());
     console.log(`${socket.id} -> mutfak`);
@@ -361,12 +451,18 @@ io.on("connection", (socket) => {
 
   // Salon personeli odasi (garson/kasiyer). Tum acik masalari gorur.
   socket.on("salona-katil", async () => {
+    if (!socketRoluVar(socket, ["salon", "kasiyer"])) return;
     socket.join("salon");
     socket.emit("salon-guncellendi", await tumAcikMasalar());
     console.log(`${socket.id} -> salon`);
   });
 
   socket.on("masa-durum-degistir", ({ masaNo, durum }, tamamlandi) => {
+    masaNo = guvenliMasaNo(masaNo);
+    if (!masaNo || !socketRoluVar(socket, ["mutfak"])) {
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: "Yetkisiz islem." });
+      return;
+    }
     masaSirayaAl(masaNo, async () => {
       const guncel = await masaDurumGuncelle(masaNo, durum);
       if (guncel) {
@@ -383,7 +479,12 @@ io.on("connection", (socket) => {
   });
 
   // Salon: masayi kapat (musteriler kalkinca). Oturum kapanir, yeni gelen temiz baslar.
-  socket.on("masa-kapat", (masaNo, tamamlandi) => {
+  socket.on("masa-kapat", (gelenMasaNo, tamamlandi) => {
+    const masaNo = guvenliMasaNo(gelenMasaNo);
+    if (!masaNo || !socketRoluVar(socket, ["salon", "kasiyer"])) {
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: "Yetkisiz islem." });
+      return;
+    }
     masaSirayaAl(masaNo, async () => {
       const bos = await masaKapat(masaNo);
       io.to(`masa-${masaNo}`).emit("masa-guncellendi", bos);
@@ -408,6 +509,7 @@ const PORT = process.env.PORT || 4000;
 // 0.0.0.0: bulut ortamlarinda (Render vb.) disaridan erisim icin gerekli.
 tablolariHazirla()
   .then(() => adminTablolariHazirla())
+  .then(() => sadakatTablolariHazirla(pool))
   .then(() => {
     httpServer.listen(PORT, "0.0.0.0", () => {
       console.log(`Burger Plus backend calisiyor -> port ${PORT}`);

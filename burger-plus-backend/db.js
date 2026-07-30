@@ -9,6 +9,7 @@
 import pkg from "pg";
 import dotenv from "dotenv";
 import { randomBytes, randomUUID } from "crypto";
+import { odemeSadakatiniUygula } from "./sadakatDb.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -83,6 +84,7 @@ export async function tablolariHazirla() {
   `);
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS odeme_id UUID");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS odeme_kalem_no INTEGER");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS siparis_no TEXT");
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS tek_odeme_siparis_kalemi
     ON siparis_kalemleri (odeme_id, odeme_kalem_no)
@@ -471,8 +473,10 @@ async function odemeUrunleriniDogrula(hamUrunler) {
 
 export async function odemeTaslagiOlustur({ kullaniciId = null, masaNo = null, yontem = "tam", urunler, kisiAdi = "Misafir" }) {
   const guvenliUrunler = await odemeUrunleriniDogrula(urunler);
-  const tip = masaNo ? "masa" : "algotur";
-  const guvenliMasa = masaNo ? String(masaNo).slice(0, 30) : null;
+  const hamMasa = masaNo == null || masaNo === "" ? null : String(masaNo).trim();
+  if (hamMasa && !/^[A-Za-z0-9_-]{1,30}$/.test(hamMasa)) throw new Error("Masa numarası geçersiz.");
+  const guvenliMasa = hamMasa;
+  const tip = guvenliMasa ? "masa" : "algotur";
   const guvenliYontem = ["tam", "esit", "urun"].includes(yontem) ? yontem : "tam";
   const tutar = guvenliUrunler.reduce((toplam, urun) => toplam + urun.fiyat * urun.adet, 0);
   const kazanilanPuan = kullaniciId ? Math.floor(tutar / 10) : 0;
@@ -525,9 +529,29 @@ async function odemeBasariliOlarakIsle(id, saglayici, saglayiciToken, kullaniciI
           [odeme.kullanici_id, odeme.kazanilan_puan, odeme.id]
         );
       }
+      const sadakat = await odemeSadakatiniUygula(baglanti, odeme);
       const davetOdulu = await davetOdulunuUygula(baglanti, odeme);
+      if (odeme.kullanici_id) {
+        await baglanti.query(
+          `INSERT INTO kullanici_siparisleri
+            (kullanici_id,siparis_no,masa_no,tip,urunler,tutar,kazanilan_puan,durum)
+           VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,'hazirlaniyor')
+           ON CONFLICT (kullanici_id,siparis_no) DO NOTHING`,
+          [odeme.kullanici_id, odeme.siparis_no, odeme.masa_no, odeme.siparis_tipi,
+            JSON.stringify(odeme.urunler), odeme.tutar, odeme.kazanilan_puan]
+        );
+      }
       await baglanti.query("COMMIT");
-      return { odeme: { ...odemeDonustur(odeme), guncelPuan, davetOdulu }, ilkOnay: true };
+      return {
+        odeme: {
+          ...odemeDonustur(odeme),
+          guncelPuan,
+          burgerDamga: sadakat.burgerDamga,
+          kazanilanHediye: sadakat.kazanilanHediye,
+          davetOdulu,
+        },
+        ilkOnay: true,
+      };
     }
     await baglanti.query("COMMIT");
   } catch (e) {
@@ -667,10 +691,31 @@ export async function masaDurumGuncelle(masaNo, durum) {
   );
   if (oturum.rows.length === 0) return null;
 
-  await pool.query(
-    "UPDATE siparis_kalemleri SET durum = $1 WHERE oturum_id = $2",
-    [durum, oturum.rows[0].id]
-  );
+  const izinliDurumlar = new Set(["yeni", "hazirlaniyor", "hazir"]);
+  if (!izinliDurumlar.has(durum)) throw new Error("Gecersiz siparis durumu.");
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const kalemler = await baglanti.query(
+      "UPDATE siparis_kalemleri SET durum=$1 WHERE oturum_id=$2 RETURNING siparis_no",
+      [durum, oturum.rows[0].id]
+    );
+    const siparisNolari = [...new Set(kalemler.rows
+      .map((kalem) => kalem.siparis_no)
+      .filter(Boolean))];
+    if (siparisNolari.length) {
+      await baglanti.query(
+        "UPDATE kullanici_siparisleri SET durum=$1 WHERE siparis_no=ANY($2::text[]) AND tamamlandi=false",
+        [durum, siparisNolari]
+      );
+    }
+    await baglanti.query("COMMIT");
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
   return masaSiparisleriniGetir(masaNo);
 }
 
@@ -687,10 +732,36 @@ export async function tumAcikMasalar() {
 // Oturum 'kapali' olur; siparisler SILINMEZ (rapor icin arsivde kalir),
 // ama yeni gelen musteri temiz masayla baslar (yeni oturum acilir).
 export async function masaKapat(masaNo) {
-  await pool.query(
-    "UPDATE oturumlar SET durum = 'kapali' WHERE masa_no = $1 AND durum = 'acik'",
-    [masaNo]
-  );
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const oturumlar = await baglanti.query(
+      "UPDATE oturumlar SET durum='kapali' WHERE masa_no=$1 AND durum='acik' RETURNING id",
+      [masaNo]
+    );
+    const oturumIdleri = oturumlar.rows.map((satir) => satir.id);
+    if (oturumIdleri.length) {
+      const kalemler = await baglanti.query(
+        "SELECT siparis_no FROM siparis_kalemleri WHERE oturum_id=ANY($1::int[])",
+        [oturumIdleri]
+      );
+      const siparisNolari = [...new Set(kalemler.rows
+        .map((kalem) => kalem.siparis_no)
+        .filter(Boolean))];
+      if (siparisNolari.length) {
+        await baglanti.query(
+          "UPDATE kullanici_siparisleri SET durum='tamamlandi',tamamlandi=true WHERE siparis_no=ANY($1::text[])",
+          [siparisNolari]
+        );
+      }
+    }
+    await baglanti.query("COMMIT");
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
   return masaSiparisleriniGetir(masaNo);
 }
 
@@ -706,7 +777,7 @@ export async function kullaniciOlustur({ ad, soyad, cinsiyet, email, telefon, si
         `INSERT INTO kullanicilar
           (ad,soyad,cinsiyet,email,telefon,sifre_hash,davet_kodu,davet_eden_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         RETURNING id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu`,
+         RETURNING id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu,burger_damga`,
         [ad, soyad, cinsiyet, email.toLowerCase(), telefon, sifreHash, davetKoduUret(), davetEdenId]
       );
       return kullaniciDonustur(sonuc.rows[0]);
@@ -730,7 +801,7 @@ export async function kullaniciBulEmail(email) {
 // ID ile kullanici bul (token dogrulamasi sonrasi; sifre_hash HARIC).
 export async function kullaniciBulId(id) {
   const sonuc = await pool.query(
-    "SELECT id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu FROM kullanicilar WHERE id=$1",
+    "SELECT id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu,burger_damga FROM kullanicilar WHERE id=$1",
     [id]
   );
   return sonuc.rows[0] ? kullaniciDonustur(sonuc.rows[0]) : null;
@@ -777,15 +848,18 @@ export async function davetOzetiniGetir(kullaniciId) {
   };
 }
 
-// Kullanicinin puanini guncelle.
-export async function kullaniciPuanGuncelle(id, yeniPuan) {
-  await pool.query("UPDATE kullanicilar SET puan = $1 WHERE id = $2", [yeniPuan, id]);
-}
-
 // Profil guncelle: SADECE email ve telefon degistirilebilir.
 // ad, soyad, cinsiyet kalicidir (degistirilemez).
 // email benzersiz olmali — baskasi kullaniyorsa hata doner.
 export async function kullaniciProfilGuncelle(id, { email, telefon }) {
+  email = String(email || "").trim().toLowerCase().slice(0, 254);
+  telefon = String(telefon || "").trim().slice(0, 20);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { hata: "Geçerli bir e-posta adresi girin." };
+  }
+  if (telefon && !/^\+?[0-9 ()-]{7,20}$/.test(telefon)) {
+    return { hata: "Telefon numarası geçersiz." };
+  }
   // Yeni email baskasinda var mi?
   if (email) {
     const mevcut = await pool.query(
@@ -798,8 +872,8 @@ export async function kullaniciProfilGuncelle(id, { email, telefon }) {
   }
   const sonuc = await pool.query(
     `UPDATE kullanicilar SET email = $1, telefon = $2 WHERE id = $3
-     RETURNING id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu`,
-    [email.toLowerCase(), telefon, id]
+     RETURNING id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu,burger_damga`,
+    [email, telefon, id]
   );
   return { kullanici: kullaniciDonustur(sonuc.rows[0]) };
 }
@@ -814,32 +888,9 @@ function kullaniciDonustur(kullanici) {
     telefon: kullanici.telefon,
     rol: kullanici.rol,
     puan: Number(kullanici.puan || 0),
+    burgerDamga: Number(kullanici.burger_damga || 0),
     davetKodu: kullanici.davet_kodu,
   };
-}
-
-export async function kullaniciSiparisKaydet(kullaniciId, veri) {
-  const siparisNo = String(veri.siparisNo || veri.id || "").trim().slice(0, 100);
-  const tip = veri.tip === "masa" ? "masa" : "algotur";
-  const masaNo = tip === "masa" ? String(veri.masaNo || "").slice(0, 30) : null;
-  const urunler = Array.isArray(veri.urunler) ? veri.urunler : [];
-  const urunlerJson = JSON.stringify(urunler);
-  const tutar = Number(veri.tutar || 0);
-  const kazanilanPuan = Math.max(0, Math.floor(Number(veri.kazanilanPuan || 0)));
-  if (!siparisNo || !Number.isFinite(tutar) || tutar < 0) throw new Error("Geçersiz sipariş bilgisi.");
-  if (Buffer.byteLength(urunlerJson, "utf8") > 250_000) throw new Error("Sipariş içeriği çok büyük.");
-
-  const sonuc = await pool.query(
-    `INSERT INTO kullanici_siparisleri
-      (kullanici_id,siparis_no,masa_no,tip,urunler,tutar,kazanilan_puan,durum)
-     VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,'hazirlaniyor')
-     ON CONFLICT (kullanici_id,siparis_no) DO UPDATE SET
-       masa_no=EXCLUDED.masa_no, tip=EXCLUDED.tip, urunler=EXCLUDED.urunler,
-       tutar=EXCLUDED.tutar, kazanilan_puan=EXCLUDED.kazanilan_puan
-     RETURNING *`,
-    [kullaniciId, siparisNo, masaNo, tip, urunlerJson, tutar, kazanilanPuan]
-  );
-  return kullaniciSiparisiniDonustur(sonuc.rows[0]);
 }
 
 export async function kullaniciSiparisleriniGetir(kullaniciId) {

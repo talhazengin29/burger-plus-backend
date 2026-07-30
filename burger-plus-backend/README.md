@@ -91,7 +91,14 @@ UPDATE kullanicilar SET rol='admin' WHERE email='senin@epostan.com';
 - `POST /api/kayit` — kayıt (ad, soyad, cinsiyet, email, telefon, sifre)
 - `POST /api/giris` — giriş (email, sifre) → token döner
 - `GET /api/ben` — token ile güncel kullanıcı (Authorization: Bearer TOKEN)
-- `POST /api/puan` — puan güncelle (giriş yapmış kullanıcı)
+- `GET /api/siparislerim` — backend tarafından kaydedilmiş hesap siparişleri
+- `GET /api/sadakat` — puan, damga, ödül kataloğu ve hediye envanteri
+- `POST /api/sadakat/oduller/:id/satin-al` — puanla ödül al (transaction + idempotency)
+- `POST /api/sadakat/hediyeler/:id/kullan` — hediyeyi backend siparişine dönüştür
+
+Puan ve sipariş kaydı için istemciye açık yazma endpoint'i yoktur. Puan,
+damga, hediye ve sipariş geçmişi yalnızca doğrulanmış ödeme/ödül işlemi içinde
+backend tarafından yazılır.
 
 ## Yayına çıkış (Supabase + Render)
 

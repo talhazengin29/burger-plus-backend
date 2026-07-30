@@ -13,7 +13,15 @@ import {
 } from "./db.js";
 
 // JWT gizli anahtari. Gercek uretimde .env'den gelmeli ve gizli olmali.
-const JWT_SECRET = process.env.JWT_SECRET || "burger-plus-gizli-anahtar-degistir";
+const URETIM = process.env.NODE_ENV === "production";
+const YEREL_JWT_SECRET = "yalnizca-yerel-gelistirme-icin-burger-plus-secret";
+const JWT_SECRET = String(process.env.JWT_SECRET || (URETIM ? "" : YEREL_JWT_SECRET));
+if (JWT_SECRET.length < 32) {
+  throw new Error("JWT_SECRET en az 32 karakter olmali ve production ortaminda zorunludur.");
+}
+if (!URETIM && !process.env.JWT_SECRET) {
+  console.warn("UYARI: Yerel JWT_SECRET kullaniliyor; canli ortamda guclu bir JWT_SECRET tanimlayin.");
+}
 const TOKEN_SURESI = "7d"; // token 7 gun gecerli
 
 // Basit e-posta bicim kontrolu
@@ -38,8 +46,8 @@ export async function kayitOl(veri) {
   if (!emailGecerli(email)) {
     return { hata: "Geçerli bir e-posta adresi girin." };
   }
-  if (sifre.length < 6) {
-    return { hata: "Şifre en az 6 karakter olmalıdır." };
+  if (sifre.length < 8) {
+    return { hata: "Şifre en az 8 karakter olmalıdır." };
   }
   if (sifre.length > 72) return { hata: "Şifre en fazla 72 karakter olabilir." };
   if (davetKodu && !/^[A-HJ-NP-Z2-9]{8}$/.test(davetKodu)) {
@@ -73,7 +81,7 @@ export async function kayitOl(veri) {
 }
 
 // --- Giris ---
-export async function girisYap({ email, sifre }) {
+export async function girisYap({ email, sifre } = {}) {
   email = String(email || "").trim().toLowerCase().slice(0, 254);
   sifre = String(sifre || "");
   if (!email || !sifre) {
@@ -147,6 +155,23 @@ export function adminMiddleware() {
     const kullanici = await tokenDogrula(token);
     if (!kullanici || kullanici.rol !== "admin") {
       return res.status(403).json({ hata: "Bu işlem için yönetici yetkisi gerekli." });
+    }
+    req.kullanici = kullanici;
+    next();
+  };
+}
+
+// Rol tabanli koruma. Kimlik dogrulama ile yetki kontrolunu tek noktada tutar.
+export function rolMiddleware(izinliRoller = []) {
+  const roller = new Set(izinliRoller);
+  return async (req, res, next) => {
+    const baslik = req.headers.authorization || "";
+    const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
+    if (!token) return res.status(401).json({ hata: "Giris gerekli." });
+    const kullanici = await tokenDogrula(token);
+    if (!kullanici) return res.status(401).json({ hata: "Oturum gecersiz." });
+    if (!roller.has(kullanici.rol) && kullanici.rol !== "admin") {
+      return res.status(403).json({ hata: "Bu islem icin yetkiniz yok." });
     }
     req.kullanici = kullanici;
     next();
