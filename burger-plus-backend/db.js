@@ -398,7 +398,7 @@ export async function kalemEkle(masaNo, urun, kisiAdi, gelenSecimler = {}, gelen
 
 // Ödeme ve mutfak akışında fiyat yalnızca backend kataloğundan hesaplanır.
 // İstemcinin gönderdiği fiyat/ad/metin alanları hiçbir şekilde kaynak kabul edilmez.
-async function odemeUrunleriniDogrula(hamUrunler) {
+async function odemeUrunleriniDogrula(hamUrunler, kullaniciId = null) {
   if (!Array.isArray(hamUrunler) || hamUrunler.length < 1 || hamUrunler.length > 50) {
     throw new Error("Ödeme için geçerli ürünler gerekli.");
   }
@@ -411,6 +411,14 @@ async function odemeUrunleriniDogrula(hamUrunler) {
     [idler]
   );
   const katalog = new Map(sonuc.rows.map((urun) => [Number(urun.id), urun]));
+  const kampanyaIndirimleri = new Map();
+  if (kullaniciId) {
+    const kampanyalar = await pool.query(`SELECT id,baslik,indirim_yuzde,gecerli_kategoriler FROM kampanyalar WHERE aktif=true AND indirim_yuzde > 0 AND (kampanya_tipi='surekli' OR (kampanya_tipi='saatli' AND EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Europe/Istanbul') >= baslangic_saat AND EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Europe/Istanbul') < bitis_saat))`);
+    for (const kampanya of kampanyalar.rows) for (const kategori of Array.isArray(kampanya.gecerli_kategoriler) ? kampanya.gecerli_kategoriler : []) {
+      const mevcut = kampanyaIndirimleri.get(kategori);
+      if (!mevcut || Number(kampanya.indirim_yuzde) > mevcut.indirimYuzde) kampanyaIndirimleri.set(kategori, { id: Number(kampanya.id), baslik: kampanya.baslik, indirimYuzde: Number(kampanya.indirim_yuzde) });
+    }
+  }
 
   return hamUrunler.map((ham) => {
     const urun = katalog.get(Number(ham?.id));
@@ -456,12 +464,17 @@ async function odemeUrunleriniDogrula(hamUrunler) {
         gramajBirim: kural?.birim || (urun.kategori === "İçecekler" ? "ml" : "gr"),
       } : {}),
     };
+    const kampanya = kampanyaIndirimleri.get(urun.kategori) || null;
+    const temelFiyat = Number(urun.fiyat);
+    const indirimliFiyat = kampanya ? Math.round(temelFiyat * (1 - kampanya.indirimYuzde / 100) * 100) / 100 : temelFiyat;
     return {
       id: Number(urun.id),
       ad: urun.ad,
       kategori: urun.kategori,
       adet,
-      fiyat: Number(urun.fiyat) + gramajFiyat,
+      fiyat: indirimliFiyat + gramajFiyat,
+      orijinalFiyat: kampanya ? temelFiyat + gramajFiyat : null,
+      kampanya,
       temelMiktar: standartGramaj || null,
       malzemeler: tumMalzemeler,
       gramajOpsiyonu: kural,
@@ -472,7 +485,7 @@ async function odemeUrunleriniDogrula(hamUrunler) {
 }
 
 export async function odemeTaslagiOlustur({ kullaniciId = null, masaNo = null, yontem = "tam", urunler, kisiAdi = "Misafir" }) {
-  const guvenliUrunler = await odemeUrunleriniDogrula(urunler);
+  const guvenliUrunler = await odemeUrunleriniDogrula(urunler, kullaniciId);
   const hamMasa = masaNo == null || masaNo === "" ? null : String(masaNo).trim();
   if (hamMasa && !/^[A-Za-z0-9_-]{1,30}$/.test(hamMasa)) throw new Error("Masa numarası geçersiz.");
   const guvenliMasa = hamMasa;

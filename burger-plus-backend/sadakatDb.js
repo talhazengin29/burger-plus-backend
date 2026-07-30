@@ -70,9 +70,7 @@ export async function sadakatTablolariHazirla(pool) {
     await pool.query(
       `INSERT INTO oduller (kod,ad,puan,urun_id,gorsel,market_aktif,aktif)
        VALUES ($1,$2,$3,$4,$5,$6,true)
-       ON CONFLICT (kod) DO UPDATE SET
-         ad=EXCLUDED.ad, puan=EXCLUDED.puan, urun_id=EXCLUDED.urun_id,
-         gorsel=EXCLUDED.gorsel, market_aktif=EXCLUDED.market_aktif, guncelleme=NOW()`,
+       ON CONFLICT (kod) DO NOTHING`,
       [kod, ad, puan, urunId, gorsel, marketAktif]
     );
   }
@@ -234,6 +232,29 @@ export async function puanlaOdulSatinAl(pool, kullaniciId, odulId, istekAnahtari
   } finally {
     baglanti.release();
   }
+}
+
+export async function adminOdulleriGetir(pool) {
+  const sonuc = await pool.query(`SELECT o.id,o.ad,o.puan,o.urun_id,o.gorsel,o.market_aktif,u.ad AS urun_ad,(SELECT COUNT(*)::int FROM kullanici_odulleri ko WHERE ko.odul_id=o.id) AS kazanilma_sayisi FROM oduller o JOIN urunler u ON u.id=o.urun_id WHERE o.market_aktif=true OR o.kod LIKE 'puan-%' OR o.kod LIKE 'admin-%' ORDER BY o.puan,o.id`);
+  return sonuc.rows.map((odul) => ({ id: Number(odul.id), ad: odul.ad, puan: Number(odul.puan), urunId: Number(odul.urun_id), urunAd: odul.urun_ad, gorsel: odul.gorsel || null, aktif: odul.market_aktif, kazanilmaSayisi: Number(odul.kazanilma_sayisi || 0) }));
+}
+
+export async function adminOdulKaydet(pool, veri) {
+  const id = veri.id == null || veri.id === "" ? null : Number(veri.id), ad = String(veri.ad || "").trim().slice(0, 120), puan = Math.floor(Number(veri.puan)), urunId = Number(veri.urunId), gorsel = String(veri.gorsel || "").trim().slice(0, 1000) || null;
+  if (!ad || !Number.isInteger(puan) || puan < 1 || puan > 1_000_000) throw new Error("Ödül adı ve geçerli puan tutarı zorunludur.");
+  if (!Number.isSafeInteger(urunId) || urunId < 1) throw new Error("Ödül için geçerli bir ürün seçin.");
+  const urun = await pool.query("SELECT id,ad,gorsel FROM urunler WHERE id=$1", [urunId]);
+  if (!urun.rows.length) throw new Error("Ödüle bağlanacak ürün bulunamadı.");
+  if (id) {
+    const mevcut = await pool.query(`SELECT o.urun_id,(SELECT COUNT(*)::int FROM kullanici_odulleri ko WHERE ko.odul_id=o.id) kazanilma_sayisi FROM oduller o WHERE o.id=$1 AND (o.market_aktif=true OR o.kod LIKE 'puan-%' OR o.kod LIKE 'admin-%')`, [id]);
+    if (!mevcut.rows.length) throw new Error("Puan marketi ödülü bulunamadı.");
+    if (Number(mevcut.rows[0].urun_id) !== urunId && Number(mevcut.rows[0].kazanilma_sayisi) > 0) throw new Error("Daha önce kazanılmış bu ödülün ürünü değiştirilemez; yeni bir ödül oluşturun.");
+    const sonuc = await pool.query(`UPDATE oduller SET ad=$1,puan=$2,urun_id=$3,gorsel=$4,market_aktif=$5,guncelleme=NOW() WHERE id=$6 RETURNING id`, [ad, puan, urunId, gorsel || urun.rows[0].gorsel, veri.aktif !== false, id]);
+    if (!sonuc.rows.length) throw new Error("Puan marketi ödülü bulunamadı.");
+  } else {
+    await pool.query(`INSERT INTO oduller (kod,ad,puan,urun_id,gorsel,market_aktif,aktif) VALUES ($1,$2,$3,$4,$5,$6,true)`, [`admin-${randomUUID()}`, ad, puan, urunId, gorsel || urun.rows[0].gorsel, veri.aktif !== false]);
+  }
+  return adminOdulleriGetir(pool);
 }
 
 export async function odemeSadakatiniUygula(baglanti, odeme) {

@@ -47,6 +47,8 @@ import {
   satisRaporuGetir,
   duyurulariGetir,
   duyuruKaydet,
+  kampanyalariGetir,
+  kampanyaKaydet,
 } from "./adminDb.js";
 import {
   kayitOl, girisYap, korumaliMiddleware, adminMiddleware, rolMiddleware,
@@ -54,7 +56,7 @@ import {
 } from "./auth.js";
 import {
   sadakatTablolariHazirla, sadakatOzetiniGetir, puanlaOdulSatinAl,
-  kullaniciOdulunuSipariseDonustur,
+  kullaniciOdulunuSipariseDonustur, adminOdulleriGetir, adminOdulKaydet,
 } from "./sadakatDb.js";
 
 const app = express();
@@ -193,6 +195,7 @@ app.get("/api/kategoriler", async (_req, res) => {
 app.get("/api/duyurular", async (_req, res) => {
   res.json({ duyurular: await duyurulariGetir() });
 });
+app.get("/api/kampanyalar", async (_req, res) => { res.json({ kampanyalar: await kampanyalariGetir() }); });
 
 // Ödeme sağlayıcısı bağlanmadan önce de sipariş ve tutar backend'de güvenli
 // taslak olarak hazırlanır. İyzico entegrasyonunda yalnızca onay endpointi
@@ -348,6 +351,10 @@ app.post("/api/admin/duyurular", admin, guvenli(async (req) => {
   io.emit("duyurular-guncellendi", await duyurulariGetir());
   return { duyuru };
 }));
+app.get("/api/admin/kampanyalar", admin, guvenli(async () => ({ kampanyalar: await kampanyalariGetir({ tumu: true }) })));
+app.post("/api/admin/kampanyalar", admin, guvenli(async (req) => { const kampanya = await kampanyaKaydet(req.body); io.emit("kampanyalar-guncellendi", await kampanyalariGetir()); return { kampanya }; }));
+app.get("/api/admin/oduller", admin, guvenli(async () => ({ oduller: await adminOdulleriGetir(pool) })));
+app.post("/api/admin/oduller", admin, guvenli(async (req) => { const oduller = await adminOdulKaydet(pool, req.body); io.emit("oduller-guncellendi"); return { oduller }; }));
 
 app.get("/", (req, res) => res.send("Burger Plus backend calisiyor (PostgreSQL)"));
 
