@@ -133,6 +133,62 @@ function gramajOpsiyonunuDogrula(ham, temelMiktar) {
   return { aktif, etiket, birim, artisMiktari, maxAdim, fiyatArtisi };
 }
 
+const URUN_TIPLERI = new Set(["burger", "yan_lezzet", "icecek", "menu"]);
+
+function boyutSecenekleriniDogrula(ham, urunTipi) {
+  if (!["yan_lezzet", "icecek"].includes(urunTipi)) return [];
+  if (!Array.isArray(ham) || ham.length < 2 || ham.length > 6) {
+    throw new Error("Yan lezzet ve içeceklerde en az 2, en fazla 6 boyut seçeneği olmalıdır.");
+  }
+  const kodlar = new Set();
+  const secenekler = ham.map((secenek, index) => {
+    const kod = String(secenek?.kod || `boyut-${index + 1}`).trim().toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 30);
+    const etiket = String(secenek?.etiket || "").trim().slice(0, 40);
+    const birim = String(secenek?.birim || (urunTipi === "icecek" ? "ml" : "gr")).trim().toLowerCase().slice(0, 12);
+    const miktar = sayi(secenek?.miktar, NaN);
+    const fiyatFarki = sayi(secenek?.fiyatFarki, NaN);
+    if (!kod || kodlar.has(kod)) throw new Error("Boyut kodları benzersiz olmalıdır.");
+    if (!etiket || !Number.isFinite(miktar) || miktar <= 0 || miktar > 10000) throw new Error("Boyut etiketi ve miktarı geçersiz.");
+    if (!Number.isFinite(fiyatFarki) || fiyatFarki < 0 || fiyatFarki > 100000) throw new Error("Boyut fiyat farkı geçersiz.");
+    kodlar.add(kod);
+    return { kod, etiket, miktar, birim, fiyatFarki, varsayilan: secenek?.varsayilan === true };
+  });
+  if (!secenekler.some((secenek) => secenek.varsayilan)) secenekler[0].varsayilan = true;
+  let varsayilanGoruldu = false;
+  return secenekler.map((secenek) => {
+    const varsayilan = secenek.varsayilan && !varsayilanGoruldu;
+    if (varsayilan) varsayilanGoruldu = true;
+    return { ...secenek, varsayilan };
+  });
+}
+
+async function menuYapisiniDogrula(ham, urunTipi) {
+  if (urunTipi !== "menu") return null;
+  const menu = {
+    burgerUrunId: Number(ham?.burgerUrunId),
+    yanLezzetUrunId: Number(ham?.yanLezzetUrunId),
+    icecekUrunId: Number(ham?.icecekUrunId),
+    varsayilanYanBoyut: String(ham?.varsayilanYanBoyut || "").trim(),
+    varsayilanIcecekBoyut: String(ham?.varsayilanIcecekBoyut || "").trim(),
+  };
+  if (![menu.burgerUrunId, menu.yanLezzetUrunId, menu.icecekUrunId].every(Number.isInteger)) {
+    throw new Error("Menü için burger, yan lezzet ve içecek seçilmelidir.");
+  }
+  const sonuc = await pool.query(
+    "SELECT id,urun_tipi,boyut_secenekleri FROM urunler WHERE id=ANY($1::int[]) AND arsivli=false AND aktif=true",
+    [[menu.burgerUrunId, menu.yanLezzetUrunId, menu.icecekUrunId]]
+  );
+  const urunler = new Map(sonuc.rows.map((urun) => [Number(urun.id), urun]));
+  if (urunler.get(menu.burgerUrunId)?.urun_tipi !== "burger") throw new Error("Menüde geçerli bir burger seçilmelidir.");
+  if (urunler.get(menu.yanLezzetUrunId)?.urun_tipi !== "yan_lezzet") throw new Error("Menüde geçerli bir yan lezzet seçilmelidir.");
+  if (urunler.get(menu.icecekUrunId)?.urun_tipi !== "icecek") throw new Error("Menüde geçerli bir içecek seçilmelidir.");
+  const yanBoyutlar = urunler.get(menu.yanLezzetUrunId).boyut_secenekleri || [];
+  const icecekBoyutlar = urunler.get(menu.icecekUrunId).boyut_secenekleri || [];
+  if (!yanBoyutlar.some((boyut) => boyut.kod === menu.varsayilanYanBoyut)) throw new Error("Menünün varsayılan yan lezzet boyutu geçersiz.");
+  if (!icecekBoyutlar.some((boyut) => boyut.kod === menu.varsayilanIcecekBoyut)) throw new Error("Menünün varsayılan içecek boyutu geçersiz.");
+  return menu;
+}
+
 export async function ilkYerelAdminOlustur({ email, sifre }) {
   const yerelVeritabani = !process.env.DATABASE_URL && ["localhost", "127.0.0.1"].includes(process.env.PGHOST);
   if (!yerelVeritabani) throw new Error("İlk admin kurulumu yalnızca yerel geliştirme ortamında kullanılabilir.");
@@ -180,6 +236,10 @@ export async function adminTablolariHazirla() {
       besin_degerleri JSONB,
       temel_miktar NUMERIC,
       gramaj_opsiyonu JSONB,
+      urun_tipi TEXT NOT NULL DEFAULT 'burger',
+      boyut_secenekleri JSONB NOT NULL DEFAULT '[]'::jsonb,
+      menu_yapisi JSONB,
+      arsivli BOOLEAN NOT NULL DEFAULT false,
       aktif BOOLEAN NOT NULL DEFAULT true,
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -247,6 +307,10 @@ export async function adminTablolariHazirla() {
   `);
 
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS besin_degerleri JSONB");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS urun_tipi TEXT NOT NULL DEFAULT 'burger'");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS boyut_secenekleri JSONB NOT NULL DEFAULT '[]'::jsonb");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS menu_yapisi JSONB");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   for (const [ad, gorsel, sira] of BASLANGIC_KATEGORILERI) {
     await pool.query(
       `INSERT INTO kategoriler (ad,gorsel,sira) VALUES ($1,$2,$3)
@@ -261,14 +325,17 @@ export async function adminTablolariHazirla() {
       [kod, etiket, baslik, aciklama, buton, butonTipi, gorsel, baslangicSaat, bitisSaat, indirimYuzde, JSON.stringify(gecerliKategoriler), kampanyaTipi, sira]
     );
   }
-  for (const [id, ad, fiyat, kategori, temelMiktar, gorsel] of BASLANGIC_URUNLERI) {
+  // Manuel katalog v2: eski demo/manuel katalog bir defa arşivlenir. Fiziksel
+  // silme yerine arşivleme, geçmiş sipariş ve ödül referanslarını korur.
+  const katalogSifirlandi = await pool.query("SELECT 1 FROM sistem_ayarlari WHERE anahtar='manuel_katalog_v2'");
+  if (!katalogSifirlandi.rows.length) {
+    await pool.query("UPDATE urunler SET aktif=false, arsivli=true, guncelleme=NOW() WHERE arsivli=false");
     await pool.query(
-      `INSERT INTO urunler (id,ad,fiyat,kategori,temel_miktar,gorsel)
-       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING`,
-      [id, ad, fiyat, kategori, temelMiktar, gorsel]
+      "INSERT INTO sistem_ayarlari (anahtar,deger) VALUES ('manuel_katalog_v2',$1::jsonb) ON CONFLICT DO NOTHING",
+      [JSON.stringify({ tarih: new Date().toISOString(), aciklama: "Katalog manuel yönetime geçirildi" })]
     );
   }
-  await pool.query("SELECT setval('urunler_id_seq', GREATEST((SELECT COALESCE(MAX(id),1) FROM urunler), 20))");
+  await pool.query("SELECT setval('urunler_id_seq', GREATEST((SELECT COALESCE(MAX(id),1) FROM urunler), 1))");
   await pool.query(`
     INSERT INTO kategoriler (ad,gorsel,sira)
     SELECT u.kategori, MIN(u.gorsel), 100 + ROW_NUMBER() OVER (ORDER BY u.kategori) * 10
@@ -278,36 +345,10 @@ export async function adminTablolariHazirla() {
     ON CONFLICT (ad) DO NOTHING
   `);
 
-  // Yeni eklenen başlangıç ürünleri eski kurulumlarda da içerikleriyle görünür.
-  for (const [id, malzemeler] of Object.entries(BASLANGIC_MALZEMELERI)) {
-    await pool.query(
-      "UPDATE urunler SET malzemeler=$1::jsonb WHERE id=$2 AND malzemeler='[]'::jsonb",
-      [JSON.stringify(malzemeler), id]
-    );
-  }
-
-  // Eski ürünlerin ekranda kullanılan dinamik varsayılanlarını bir defa ürün
-  // datasına yaz. Adminin daha sonra değiştirdiği veya kapattığı kural korunur.
-  const gramajsizUrunler = await pool.query(
-    "SELECT id,kategori,temel_miktar,fiyat FROM urunler WHERE gramaj_opsiyonu IS NULL"
-  );
-  for (const urun of gramajsizUrunler.rows) {
-    const gramajOpsiyonu = varsayilanGramajOpsiyonu(urun.kategori, urun.temel_miktar, urun.fiyat);
-    if (gramajOpsiyonu) {
-      await pool.query("UPDATE urunler SET gramaj_opsiyonu=$1::jsonb WHERE id=$2 AND gramaj_opsiyonu IS NULL", [JSON.stringify(gramajOpsiyonu), urun.id]);
-    }
-  }
-
   // Demo başlangıç verileri yalnızca bir defa eklenir. Sonraki başlangıçlarda
   // adminin eklediği/değiştirdiği kayıtlar korunur ve veriler çoğalmaz.
   const demoKuruldu = await pool.query("SELECT 1 FROM sistem_ayarlari WHERE anahtar='demo_seed_v1'");
   if (!demoKuruldu.rows.length) {
-    for (const [id, malzemeler] of Object.entries(BASLANGIC_MALZEMELERI)) {
-      await pool.query(
-        "UPDATE urunler SET malzemeler=$1::jsonb WHERE id=$2 AND malzemeler='[]'::jsonb",
-        [JSON.stringify(malzemeler), id]
-      );
-    }
     const personelVar = await pool.query("SELECT 1 FROM personeller LIMIT 1");
     if (!personelVar.rows.length) {
       await pool.query(`
@@ -337,6 +378,9 @@ function urunDonustur(u) {
     alerjenler: u.alerjenler || [],
     besinDegerleri: u.besin_degerleri || null,
     temelMiktar: u.temel_miktar == null ? null : Number(u.temel_miktar),
+    urunTipi: u.urun_tipi || "burger",
+    boyutSecenekleri: u.boyut_secenekleri || [],
+    menuYapisi: u.menu_yapisi || null,
     aktif: u.aktif,
   };
   if (u.gramaj_opsiyonu != null) urun.gramajOpsiyonu = u.gramaj_opsiyonu;
@@ -347,7 +391,7 @@ export async function urunleriGetir({ tumu = false } = {}) {
   const sonuc = await pool.query(`
     SELECT u.*
     FROM urunler u
-    ${tumu ? "" : "WHERE u.aktif = true"}
+    WHERE u.arsivli = false ${tumu ? "" : "AND u.aktif = true"}
     ORDER BY u.kategori, u.ad
   `);
   return sonuc.rows.map(urunDonustur);
@@ -420,8 +464,12 @@ export async function kategoriKaydet(veri) {
 }
 
 export async function urunKaydet(veri) {
-  const temelMiktar = veri.temelMiktar === "" || veri.temelMiktar == null ? null : sayi(veri.temelMiktar);
-  const gramajOpsiyonu = gramajOpsiyonunuDogrula(veri.gramajOpsiyonu, temelMiktar);
+  const urunTipi = URUN_TIPLERI.has(veri.urunTipi) ? veri.urunTipi : "burger";
+  const temelMiktar = urunTipi === "burger" && veri.temelMiktar !== "" && veri.temelMiktar != null
+    ? sayi(veri.temelMiktar) : null;
+  const gramajOpsiyonu = urunTipi === "burger" ? gramajOpsiyonunuDogrula(veri.gramajOpsiyonu, temelMiktar) : null;
+  const boyutSecenekleri = boyutSecenekleriniDogrula(veri.boyutSecenekleri, urunTipi);
+  const menuYapisi = await menuYapisiniDogrula(veri.menuYapisi, urunTipi);
   const alanlar = [
     String(veri.ad || "").trim().slice(0, 120),
     sayi(veri.fiyat),
@@ -432,6 +480,9 @@ export async function urunKaydet(veri) {
     JSON.stringify(Array.isArray(veri.alerjenler) ? veri.alerjenler.slice(0, 50) : []),
     temelMiktar,
     gramajOpsiyonu == null ? null : JSON.stringify(gramajOpsiyonu),
+    urunTipi,
+    JSON.stringify(boyutSecenekleri),
+    menuYapisi == null ? null : JSON.stringify(menuYapisi),
     veri.aktif !== false,
   ];
   if (!alanlar[0] || alanlar[1] < 0) throw new Error("Ürün adı ve geçerli fiyat zorunludur.");
@@ -444,19 +495,37 @@ export async function urunKaydet(veri) {
     ? await pool.query(
         `UPDATE urunler SET ad=$1, fiyat=$2, kategori=$3, gorsel=$4, aciklama=$5,
           malzemeler=$6::jsonb, alerjenler=$7::jsonb, temel_miktar=$8,
-          gramaj_opsiyonu=$9::jsonb, aktif=$10, guncelleme=NOW()
-         WHERE id=$11 RETURNING *`, [...alanlar, veri.id]
+          gramaj_opsiyonu=$9::jsonb, urun_tipi=$10, boyut_secenekleri=$11::jsonb,
+          menu_yapisi=$12::jsonb, aktif=$13, arsivli=false, guncelleme=NOW()
+         WHERE id=$14 AND arsivli=false RETURNING *`, [...alanlar, veri.id]
       )
     : await pool.query(
         `INSERT INTO urunler
-          (ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,temel_miktar,gramaj_opsiyonu,aktif)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10) RETURNING *`, alanlar
+          (ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,temel_miktar,gramaj_opsiyonu,
+           urun_tipi,boyut_secenekleri,menu_yapisi,aktif,arsivli)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13,false) RETURNING *`, alanlar
       );
+  if (!sonuc.rows.length) throw new Error("Ürün bulunamadı veya arşivlenmiş.");
   return urunDonustur(sonuc.rows[0]);
 }
 
 export async function urunAktiflikDegistir(id, aktif) {
-  await pool.query("UPDATE urunler SET aktif=$1, guncelleme=NOW() WHERE id=$2", [!!aktif, id]);
+  await pool.query("UPDATE urunler SET aktif=$1, guncelleme=NOW() WHERE id=$2 AND arsivli=false", [!!aktif, id]);
+}
+
+export async function urunArsivle(id) {
+  const sonuc = await pool.query(
+    "UPDATE urunler SET aktif=false,arsivli=true,guncelleme=NOW() WHERE id=$1 AND arsivli=false RETURNING id",
+    [id]
+  );
+  if (!sonuc.rows.length) throw new Error("Ürün bulunamadı.");
+  await pool.query(
+    `UPDATE urunler SET aktif=false,arsivli=true,guncelleme=NOW()
+     WHERE urun_tipi='menu' AND arsivli=false AND (
+       menu_yapisi->>'burgerUrunId'=$1 OR menu_yapisi->>'yanLezzetUrunId'=$1 OR menu_yapisi->>'icecekUrunId'=$1
+     )`,
+    [String(id)]
+  );
 }
 
 export async function personelleriGetir() {

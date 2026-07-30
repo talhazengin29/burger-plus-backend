@@ -406,11 +406,24 @@ async function odemeUrunleriniDogrula(hamUrunler, kullaniciId = null) {
   if (!idler.length) throw new Error("Ürün bilgisi geçersiz.");
 
   const sonuc = await pool.query(
-    `SELECT id,ad,fiyat,kategori,malzemeler,temel_miktar,gramaj_opsiyonu,aktif
-     FROM urunler WHERE id = ANY($1::int[])`,
+    `SELECT id,ad,fiyat,kategori,malzemeler,temel_miktar,gramaj_opsiyonu,urun_tipi,
+            boyut_secenekleri,menu_yapisi,aktif
+     FROM urunler WHERE id = ANY($1::int[]) AND arsivli=false`,
     [idler]
   );
   const katalog = new Map(sonuc.rows.map((urun) => [Number(urun.id), urun]));
+  const bagliIdler = [...new Set(sonuc.rows.flatMap((urun) => {
+    const menu = urun.menu_yapisi || {};
+    return [menu.burgerUrunId, menu.yanLezzetUrunId, menu.icecekUrunId]
+      .map(Number).filter(Number.isInteger);
+  }))];
+  const bagliSonuc = bagliIdler.length
+    ? await pool.query(
+      `SELECT id,ad,malzemeler,temel_miktar,gramaj_opsiyonu,urun_tipi,boyut_secenekleri,aktif
+       FROM urunler WHERE id=ANY($1::int[]) AND arsivli=false`, [bagliIdler]
+    )
+    : { rows: [] };
+  const bagliUrunler = new Map(bagliSonuc.rows.map((urun) => [Number(urun.id), urun]));
   const kampanyaIndirimleri = new Map();
   if (kullaniciId) {
     const kampanyalar = await pool.query(`SELECT id,baslik,indirim_yuzde,gecerli_kategoriler FROM kampanyalar WHERE aktif=true AND indirim_yuzde > 0 AND (kampanya_tipi='surekli' OR (kampanya_tipi='saatli' AND EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Europe/Istanbul') >= baslangic_saat AND EXTRACT(HOUR FROM NOW() AT TIME ZONE 'Europe/Istanbul') < bitis_saat))`);
@@ -426,8 +439,17 @@ async function odemeUrunleriniDogrula(hamUrunler, kullaniciId = null) {
     const adet = Math.floor(Number(ham?.adet || 0));
     if (!Number.isInteger(adet) || adet < 1 || adet > 30) throw new Error("Ürün adedi geçersiz.");
 
-    const kural = urun.gramaj_opsiyonu && urun.gramaj_opsiyonu.aktif ? urun.gramaj_opsiyonu : null;
     const gonderilenSecimler = ham?.secimler && typeof ham.secimler === "object" ? ham.secimler : {};
+    const urunTipi = urun.urun_tipi || "burger";
+    const menu = urunTipi === "menu" ? (urun.menu_yapisi || {}) : null;
+    const burger = menu ? bagliUrunler.get(Number(menu.burgerUrunId)) : urun;
+    const yanLezzet = menu ? bagliUrunler.get(Number(menu.yanLezzetUrunId)) : null;
+    const icecek = menu ? bagliUrunler.get(Number(menu.icecekUrunId)) : null;
+    if (menu && (!burger?.aktif || !yanLezzet?.aktif || !icecek?.aktif)) {
+      throw new Error(`${urun.ad} menüsündeki bir ürün artık satışta değil.`);
+    }
+
+    const kural = burger?.gramaj_opsiyonu && burger.gramaj_opsiyonu.aktif ? burger.gramaj_opsiyonu : null;
     const istenenEkstra = Number(gonderilenSecimler.ekstraGramaj || 0);
     let ekstraGramaj = 0;
     let gramajFiyat = 0;
@@ -445,14 +467,48 @@ async function odemeUrunleriniDogrula(hamUrunler, kullaniciId = null) {
       throw new Error(`${urun.ad} için gramaj artırımı bulunmuyor.`);
     }
 
-    const tumMalzemeler = Array.isArray(urun.malzemeler) ? urun.malzemeler : [];
+    const tumMalzemeler = Array.isArray(burger?.malzemeler) ? burger.malzemeler : [];
     const haricAdaylari = Array.isArray(ham?.haricMalzemeler)
       ? ham.haricMalzemeler
       : Array.isArray(gonderilenSecimler.haricMalzemeler) ? gonderilenSecimler.haricMalzemeler : [];
     const haricMalzemeler = [...new Set(haricAdaylari
       .filter((m) => typeof m === "string" && tumMalzemeler.includes(m)))]
       .slice(0, 50);
-    const standartGramaj = Number(urun.temel_miktar || 0);
+    const standartGramaj = Number(burger?.temel_miktar || 0);
+    let boyutFiyati = 0;
+    const boyutSec = (kaynak, istenenKod, varsayilanKod, alan) => {
+      const secenekler = Array.isArray(kaynak?.boyut_secenekleri) ? kaynak.boyut_secenekleri : [];
+      const varsayilanIndex = Math.max(0, secenekler.findIndex((secenek) => secenek.kod === varsayilanKod || (!varsayilanKod && secenek.varsayilan)));
+      const secilenIndex = secenekler.findIndex((secenek) => secenek.kod === (istenenKod || secenekler[varsayilanIndex]?.kod));
+      if (secilenIndex < varsayilanIndex || secilenIndex < 0) throw new Error(`${kaynak?.ad || urun.ad} boyut seçimi geçersiz.`);
+      const secilen = secenekler[secilenIndex];
+      const varsayilan = secenekler[varsayilanIndex];
+      boyutFiyati += Number(secilen.fiyatFarki || 0) - Number(varsayilan?.fiyatFarki || 0);
+      return {
+        [`${alan}BoyutKodu`]: secilen.kod,
+        [`${alan}BoyutEtiketi`]: secilen.etiket,
+        [`${alan}BoyutMiktar`]: Number(secilen.miktar),
+        [`${alan}BoyutBirim`]: secilen.birim,
+      };
+    };
+    let boyutSecimleri = {};
+    if (["yan_lezzet", "icecek"].includes(urunTipi)) {
+      boyutSecimleri = boyutSec(urun, gonderilenSecimler.boyutKodu, null, "");
+      boyutSecimleri = {
+        boyutKodu: boyutSecimleri.BoyutKodu,
+        boyutEtiketi: boyutSecimleri.BoyutEtiketi,
+        boyutMiktar: boyutSecimleri.BoyutMiktar,
+        boyutBirim: boyutSecimleri.BoyutBirim,
+      };
+    } else if (menu) {
+      boyutSecimleri = {
+        menuBurgerId: Number(burger.id), menuBurgerAd: burger.ad,
+        yanLezzetId: Number(yanLezzet.id), yanLezzetAd: yanLezzet.ad,
+        icecekId: Number(icecek.id), icecekAd: icecek.ad,
+        ...boyutSec(yanLezzet, gonderilenSecimler.yanBoyutKodu, menu.varsayilanYanBoyut, "yan"),
+        ...boyutSec(icecek, gonderilenSecimler.icecekBoyutKodu, menu.varsayilanIcecekBoyut, "icecek"),
+      };
+    }
     const secimler = {
       dahilMalzemeler: tumMalzemeler.filter((m) => !haricMalzemeler.includes(m)),
       haricMalzemeler,
@@ -461,8 +517,9 @@ async function odemeUrunleriniDogrula(hamUrunler, kullaniciId = null) {
         ekstraGramaj,
         toplamGramaj: standartGramaj + ekstraGramaj,
         gramajEtiketi: kural?.etiket || "Ürün gramajı",
-        gramajBirim: kural?.birim || (urun.kategori === "İçecekler" ? "ml" : "gr"),
+        gramajBirim: kural?.birim || "gr",
       } : {}),
+      ...boyutSecimleri,
     };
     const kampanya = kampanyaIndirimleri.get(urun.kategori) || null;
     const temelFiyat = Number(urun.fiyat);
@@ -472,12 +529,13 @@ async function odemeUrunleriniDogrula(hamUrunler, kullaniciId = null) {
       ad: urun.ad,
       kategori: urun.kategori,
       adet,
-      fiyat: indirimliFiyat + gramajFiyat,
-      orijinalFiyat: kampanya ? temelFiyat + gramajFiyat : null,
+      fiyat: indirimliFiyat + gramajFiyat + boyutFiyati,
+      orijinalFiyat: kampanya ? temelFiyat + gramajFiyat + boyutFiyati : null,
       kampanya,
       temelMiktar: standartGramaj || null,
       malzemeler: tumMalzemeler,
       gramajOpsiyonu: kural,
+      urunTipi,
       haricMalzemeler,
       secimler,
     };
