@@ -51,7 +51,7 @@ import {
   kampanyalariGetir,
   kampanyaKaydet,
 } from "./adminDb.js";
-import { pngGorselYukle } from "./storage.js";
+import { gorselYukle } from "./storage.js";
 import {
   kayitOl, girisYap, korumaliMiddleware, adminMiddleware, rolMiddleware,
   opsiyonelKullaniciMiddleware, tokenDogrula,
@@ -340,8 +340,8 @@ app.delete("/api/admin/urunler/:id", admin, guvenli(async (req) => {
   await urunArsivle(req.params.id);
   io.emit("urunler-guncellendi", await urunleriGetir());
 }));
-app.post("/api/admin/gorseller", admin, express.raw({ type: "image/png", limit: "5mb" }), guvenli(async (req) => {
-  const gorsel = await pngGorselYukle(req.body);
+app.post("/api/admin/gorseller", admin, express.raw({ type: "image/*", limit: "5mb" }), guvenli(async (req) => {
+  const gorsel = await gorselYukle(req.body);
   return { gorsel };
 }));
 app.get("/api/admin/kategoriler", admin, guvenli(async () => ({ kategoriler: await kategorileriGetir({ tumu: true }) })));
