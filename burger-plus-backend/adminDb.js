@@ -942,13 +942,14 @@ export async function revizyonKayitlariniGetir({ arama = "", varlikTuru = "", is
   return sonuc.rows;
 }
 
-export async function canliSatislariGetir({ arama = "", durum = "", baslangic = null, bitis = null, limit = 100 } = {}) {
+async function satisKayitlariniGetir({ arama = "", durum = "", baslangic = null, bitis = null, limit = 100 } = {}, acikOturum = true) {
   const sonuc = await pool.query(
     `WITH siparisler AS (
        SELECT COALESCE(k.siparis_no,'LEGACY-'||k.oturum_id::text) AS siparis_no,
          MIN(o.masa_no) AS masa_no, MIN(k.kisi_adi) AS kisi_adi,
          SUM(k.fiyat*k.adet) AS tutar, SUM(k.adet)::int AS urun_adedi,
-         MIN(k.olusturma) AS olusturma,
+         MIN(k.olusturma) AS olusturma, MAX(o.kapandi_at) AS kapandi_at,
+         BOOL_OR(o.durum='acik') AS oturum_acik,
          CASE WHEN BOOL_AND(k.durum='hazir') THEN 'hazir'
               WHEN BOOL_OR(k.durum='hazirlaniyor') THEN 'hazirlaniyor' ELSE 'yeni' END AS durum,
          JSONB_AGG(JSONB_BUILD_OBJECT('ad',k.urun_ad,'adet',k.adet,'fiyat',k.fiyat) ORDER BY k.id) AS urunler
@@ -960,10 +961,19 @@ export async function canliSatislariGetir({ arama = "", durum = "", baslangic = 
        AND ($2='' OR durum=$2)
        AND ($3::timestamptz IS NULL OR olusturma >= $3::timestamptz)
        AND ($4::timestamptz IS NULL OR olusturma < $4::timestamptz + INTERVAL '1 day')
-     ORDER BY olusturma DESC LIMIT $5`,
-    [String(arama).trim().slice(0, 100), String(durum).trim(), baslangic || null, bitis || null, Math.min(300, Math.max(1, Number(limit) || 100))]
+       AND oturum_acik=$5
+     ORDER BY COALESCE(kapandi_at,olusturma) DESC LIMIT $6`,
+    [String(arama).trim().slice(0, 100), String(durum).trim(), baslangic || null, bitis || null, acikOturum, Math.min(300, Math.max(1, Number(limit) || 100))]
   );
   return sonuc.rows.map((satir) => ({ ...satir, tutar: Number(satir.tutar), urunAdedi: Number(satir.urun_adedi) }));
+}
+
+export async function canliSatislariGetir(secenekler = {}) {
+  return satisKayitlariniGetir(secenekler, true);
+}
+
+export async function gecmisSatislariGetir(secenekler = {}) {
+  return satisKayitlariniGetir(secenekler, false);
 }
 
 export async function mutfakKayitlariniGetir({ arama = "", durum = "", personelId = "", baslangic = null, bitis = null, limit = 200 } = {}) {
@@ -973,6 +983,7 @@ export async function mutfakKayitlariniGetir({ arama = "", durum = "", personelI
          MIN(o.masa_no) AS masa_no, MIN(k.kisi_adi) AS kisi_adi,
          MIN(k.olusturma) AS siparis_at,
          MIN(k.hazirlamaya_baslandi) AS baslangic_at, MAX(k.hazir_at) AS hazir_at,
+         MAX(o.kapandi_at) AS kapandi_at,
          CASE WHEN BOOL_AND(k.durum='hazir') THEN 'hazir'
               WHEN BOOL_OR(k.durum='hazirlaniyor') THEN 'hazirlaniyor' ELSE 'yeni' END AS durum,
          MAX(k.hazirlayan_personel_id) AS personel_id,
@@ -985,8 +996,10 @@ export async function mutfakKayitlariniGetir({ arama = "", durum = "", personelI
        GROUP BY COALESCE(k.siparis_no,'LEGACY-'||k.oturum_id::text)
      )
      SELECT *,
-       CASE WHEN baslangic_at IS NOT NULL THEN ROUND(EXTRACT(EPOCH FROM (COALESCE(hazir_at,NOW())-baslangic_at))/60.0,1) END AS hazirlama_dakika,
-       CASE WHEN hazir_at IS NOT NULL THEN ROUND(EXTRACT(EPOCH FROM (hazir_at-siparis_at))/60.0,1) END AS toplam_dakika
+       CASE WHEN baslangic_at IS NOT NULL THEN GREATEST(0,ROUND(EXTRACT(EPOCH FROM (baslangic_at-siparis_at))))::int END AS bekleme_saniye,
+       CASE WHEN baslangic_at IS NOT NULL THEN GREATEST(0,ROUND(EXTRACT(EPOCH FROM (COALESCE(hazir_at,NOW())-baslangic_at)))::int) END AS hazirlama_saniye,
+       CASE WHEN hazir_at IS NOT NULL THEN GREATEST(0,ROUND(EXTRACT(EPOCH FROM (hazir_at-siparis_at)))::int) END AS toplam_saniye,
+       CASE WHEN hazir_at IS NOT NULL AND kapandi_at IS NOT NULL THEN GREATEST(0,ROUND(EXTRACT(EPOCH FROM (kapandi_at-hazir_at)))::int) END AS masa_kapanis_saniye
      FROM kayitlar
      WHERE ($1='' OR siparis_no ILIKE '%'||$1||'%' OR urunler ILIKE '%'||$1||'%' OR COALESCE(kisi_adi,'') ILIKE '%'||$1||'%')
        AND ($2='' OR durum=$2)
@@ -999,8 +1012,12 @@ export async function mutfakKayitlariniGetir({ arama = "", durum = "", personelI
   return sonuc.rows.map((satir) => ({
     ...satir,
     urunAdedi: Number(satir.urun_adedi),
-    hazirlamaDakika: satir.hazirlama_dakika == null ? null : Number(satir.hazirlama_dakika),
-    toplamDakika: satir.toplam_dakika == null ? null : Number(satir.toplam_dakika),
+    beklemeSaniye: satir.bekleme_saniye == null ? null : Number(satir.bekleme_saniye),
+    hazirlamaSaniye: satir.hazirlama_saniye == null ? null : Number(satir.hazirlama_saniye),
+    toplamSaniye: satir.toplam_saniye == null ? null : Number(satir.toplam_saniye),
+    masaKapanisSaniye: satir.masa_kapanis_saniye == null ? null : Number(satir.masa_kapanis_saniye),
+    hazirlamaDakika: satir.hazirlama_saniye == null ? null : Number(satir.hazirlama_saniye) / 60,
+    toplamDakika: satir.toplam_saniye == null ? null : Number(satir.toplam_saniye) / 60,
   }));
 }
 

@@ -760,7 +760,7 @@ function odemeDonustur(odeme) {
 }
 
 // Mutfak: bir masanin tum kalemlerini belirli duruma gecir.
-export async function masaDurumGuncelle(masaNo, durum, kullaniciId = null) {
+export async function masaDurumGuncelle(masaNo, durum, kullaniciId = null, siparisNo = null) {
   const oturum = await pool.query(
     "SELECT * FROM oturumlar WHERE masa_no = $1 AND durum = 'acik' ORDER BY id DESC LIMIT 1",
     [masaNo]
@@ -769,6 +769,8 @@ export async function masaDurumGuncelle(masaNo, durum, kullaniciId = null) {
 
   const izinliDurumlar = new Set(["yeni", "hazirlaniyor", "hazir"]);
   if (!izinliDurumlar.has(durum)) throw new Error("Gecersiz siparis durumu.");
+  const guvenliSiparisNo = siparisNo == null ? null : String(siparisNo).trim().slice(0, 120);
+  if (siparisNo != null && !guvenliSiparisNo) throw new Error("Gecersiz siparis numarasi.");
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
@@ -779,11 +781,11 @@ export async function masaDurumGuncelle(masaNo, durum, kullaniciId = null) {
     let kalemler;
     if (durum === "hazirlaniyor") {
       kalemler = await baglanti.query(
-        `UPDATE siparis_kalemleri SET durum=$1,
+         `UPDATE siparis_kalemleri SET durum=$1,
            hazirlamaya_baslandi=COALESCE(hazirlamaya_baslandi,NOW()),
            hazirlayan_personel_id=COALESCE($3,hazirlayan_personel_id)
-         WHERE oturum_id=$2 RETURNING siparis_no`,
-        [durum, oturum.rows[0].id, personelId]
+         WHERE oturum_id=$2 AND ($4::text IS NULL OR siparis_no=$4) RETURNING siparis_no`,
+        [durum, oturum.rows[0].id, personelId, guvenliSiparisNo]
       );
     } else if (durum === "hazir") {
       kalemler = await baglanti.query(
@@ -791,13 +793,13 @@ export async function masaDurumGuncelle(masaNo, durum, kullaniciId = null) {
            hazirlamaya_baslandi=COALESCE(hazirlamaya_baslandi,NOW()),
            hazir_at=COALESCE(hazir_at,NOW()),
            hazirlayan_personel_id=COALESCE($3,hazirlayan_personel_id)
-         WHERE oturum_id=$2 RETURNING siparis_no`,
-        [durum, oturum.rows[0].id, personelId]
+         WHERE oturum_id=$2 AND ($4::text IS NULL OR siparis_no=$4) RETURNING siparis_no`,
+        [durum, oturum.rows[0].id, personelId, guvenliSiparisNo]
       );
     } else {
       kalemler = await baglanti.query(
-        "UPDATE siparis_kalemleri SET durum=$1 WHERE oturum_id=$2 RETURNING siparis_no",
-        [durum, oturum.rows[0].id]
+        "UPDATE siparis_kalemleri SET durum=$1 WHERE oturum_id=$2 AND ($3::text IS NULL OR siparis_no=$3) RETURNING siparis_no",
+        [durum, oturum.rows[0].id, guvenliSiparisNo]
       );
     }
     const siparisNolari = [...new Set(kalemler.rows

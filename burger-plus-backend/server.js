@@ -59,6 +59,7 @@ import {
   revizyonKaydet,
   revizyonKayitlariniGetir,
   canliSatislariGetir,
+  gecmisSatislariGetir,
   mutfakKayitlariniGetir,
   musteriKayitlariniGetir,
   personelKayitlariniGetir,
@@ -78,14 +79,20 @@ app.disable("x-powered-by");
 const URETIM = process.env.NODE_ENV === "production";
 if (URETIM) app.set("trust proxy", 1);
 function originiNormallestir(origin) {
-  const ham = String(origin || "").trim().replace(/\/$/, "");
+  const ham = String(origin || "").trim();
   if (!ham) return "";
-  if (/^https?:\/\//i.test(ham)) return ham;
-  if (/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(ham)) return `http://${ham}`;
-  return `https://${ham}`;
+  const protokollu = /^https?:\/\//i.test(ham)
+    ? ham
+    : /^(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(ham) ? `http://${ham}` : `https://${ham}`;
+  try {
+    const url = new URL(protokollu);
+    return ["http:", "https:"].includes(url.protocol) ? url.origin : "";
+  } catch {
+    return "";
+  }
 }
 const izinliOriginler = new Set(
-  [process.env.FRONTEND_URL, ...(process.env.CORS_ORIGINS || "").split(",")]
+  [process.env.FRONTEND_URL, "https://burgerplus.vercel.app", ...(process.env.CORS_ORIGINS || "").split(",")]
     .map(originiNormallestir)
     .filter(Boolean)
 );
@@ -99,7 +106,9 @@ function originIzinli(origin) {
 const corsAyarlari = {
   origin(origin, callback) {
     if (originIzinli(origin)) return callback(null, true);
-    callback(new Error("Bu origin icin CORS izni yok."));
+    const hata = new Error("Bu origin icin CORS izni yok.");
+    hata.kod = "CORS_ENGELLENDI";
+    callback(hata);
   },
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
@@ -418,6 +427,7 @@ app.post("/api/admin/personeller/:id/vardiya", admin, guvenli(async (req) => {
 }));
 app.get("/api/admin/raporlar/satis", admin, guvenli((req) => satisRaporuGetir(req.query.gun)));
 app.get("/api/admin/satislar/canli", admin, guvenli(async (req) => ({ satislar: await canliSatislariGetir(req.query) })));
+app.get("/api/admin/satislar/gecmis", admin, guvenli(async (req) => ({ satislar: await gecmisSatislariGetir(req.query) })));
 app.get("/api/admin/kayitlar/mutfak", admin, guvenli(async (req) => ({ kayitlar: await mutfakKayitlariniGetir(req.query) })));
 app.get("/api/admin/kayitlar/musteriler", admin, guvenli(async (req) => ({ musteriler: await musteriKayitlariniGetir(req.query) })));
 app.get("/api/admin/kayitlar/personel", admin, guvenli(async (req) => personelKayitlariniGetir(req.query)));
@@ -566,20 +576,20 @@ io.on("connection", (socket) => {
     socket.emit("yonetim-satislar", await canliSatislariGetir({ limit: 50 }));
   });
 
-  socket.on("masa-durum-degistir", ({ masaNo, durum }, tamamlandi) => {
+  socket.on("masa-durum-degistir", ({ masaNo, siparisNo, durum }, tamamlandi) => {
     masaNo = guvenliMasaNo(masaNo);
     if (!masaNo || !socketRoluVar(socket, ["mutfak"])) {
       if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: "Yetkisiz islem." });
       return;
     }
     masaSirayaAl(masaNo, async () => {
-      const guncel = await masaDurumGuncelle(masaNo, durum, socket.kullanici?.id);
+      const guncel = await masaDurumGuncelle(masaNo, durum, socket.kullanici?.id, siparisNo);
       if (guncel) {
         io.to(`masa-${masaNo}`).emit("masa-guncellendi", guncel);
         const tumMasalar = await tumAcikMasalar();
         io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
         io.to("salon").emit("salon-guncellendi", tumMasalar);
-        io.to("yonetim").emit("yonetim-operasyon-guncellendi", { masaNo, durum, zaman: new Date().toISOString() });
+        io.to("yonetim").emit("yonetim-operasyon-guncellendi", { masaNo, siparisNo, durum, zaman: new Date().toISOString() });
       }
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
     }).catch((e) => {
@@ -612,6 +622,14 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => console.log("Ayrildi:", socket.id));
+});
+
+app.use((err, _req, res, _next) => {
+  if (err?.kod === "CORS_ENGELLENDI") {
+    return res.status(403).json({ hata: "Bu adresin backend erişimine izin verilmiyor." });
+  }
+  console.error("Beklenmeyen HTTP hatası:", err?.message || err);
+  res.status(500).json({ hata: "Sunucu isteği tamamlayamadı." });
 });
 
 const PORT = process.env.PORT || 4000;

@@ -17,7 +17,7 @@ function mutlakTemelUrl(deger, ad) {
   try {
     const url = new URL(protokollu);
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error();
-    return url.toString().replace(/\/$/, "");
+    return url.origin;
   } catch {
     throw new Error(`${ad} geçerli bir web adresi olmalı.`);
   }
