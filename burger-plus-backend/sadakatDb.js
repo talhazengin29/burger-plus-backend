@@ -52,6 +52,7 @@ export async function sadakatTablolariHazirla(pool) {
     CREATE INDEX IF NOT EXISTS kullanici_odulleri_kullanici_idx
       ON kullanici_odulleri (kullanici_id, olusturma DESC);
   `);
+  await pool.query("ALTER TABLE oduller ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   await pool.query(`
     DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='oduller_urun_id_fkey') THEN
@@ -236,7 +237,7 @@ export async function puanlaOdulSatinAl(pool, kullaniciId, odulId, istekAnahtari
 }
 
 export async function adminOdulleriGetir(pool) {
-  const sonuc = await pool.query(`SELECT o.id,o.ad,o.puan,o.urun_id,o.gorsel,o.market_aktif,u.ad AS urun_ad,(SELECT COUNT(*)::int FROM kullanici_odulleri ko WHERE ko.odul_id=o.id) AS kazanilma_sayisi FROM oduller o JOIN urunler u ON u.id=o.urun_id WHERE u.arsivli=false AND (o.market_aktif=true OR o.kod LIKE 'puan-%' OR o.kod LIKE 'admin-%') ORDER BY o.puan,o.id`);
+  const sonuc = await pool.query(`SELECT o.id,o.ad,o.puan,o.urun_id,o.gorsel,o.market_aktif,u.ad AS urun_ad,(SELECT COUNT(*)::int FROM kullanici_odulleri ko WHERE ko.odul_id=o.id) AS kazanilma_sayisi FROM oduller o JOIN urunler u ON u.id=o.urun_id WHERE o.arsivli=false AND u.arsivli=false AND (o.market_aktif=true OR o.kod LIKE 'puan-%' OR o.kod LIKE 'admin-%') ORDER BY o.puan,o.id`);
   return sonuc.rows.map((odul) => ({ id: Number(odul.id), ad: odul.ad, puan: Number(odul.puan), urunId: Number(odul.urun_id), urunAd: odul.urun_ad, gorsel: odul.gorsel || null, aktif: odul.market_aktif, kazanilmaSayisi: Number(odul.kazanilma_sayisi || 0) }));
 }
 
@@ -256,6 +257,14 @@ export async function adminOdulKaydet(pool, veri) {
     await pool.query(`INSERT INTO oduller (kod,ad,puan,urun_id,gorsel,market_aktif,aktif) VALUES ($1,$2,$3,$4,$5,$6,true)`, [`admin-${randomUUID()}`, ad, puan, urunId, gorsel || urun.rows[0].gorsel, veri.aktif !== false]);
   }
   return adminOdulleriGetir(pool);
+}
+
+export async function adminOdulArsivle(pool, id) {
+  const sonuc = await pool.query(
+    "UPDATE oduller SET market_aktif=false,aktif=false,arsivli=true,guncelleme=NOW() WHERE id=$1 AND arsivli=false RETURNING id",
+    [id]
+  );
+  if (!sonuc.rows.length) throw new Error("Puan marketi ödülü bulunamadı.");
 }
 
 export async function odemeSadakatiniUygula(baglanti, odeme) {

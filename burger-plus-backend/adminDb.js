@@ -285,10 +285,23 @@ export async function adminTablolariHazirla() {
     CREATE TABLE IF NOT EXISTS kampanyalar (
       id SERIAL PRIMARY KEY, kod TEXT UNIQUE, etiket TEXT NOT NULL, baslik TEXT NOT NULL,
       aciklama TEXT NOT NULL, buton TEXT NOT NULL DEFAULT 'Sipariş Ver', buton_tipi TEXT NOT NULL DEFAULT 'primary',
-      gorsel TEXT, aktif BOOLEAN NOT NULL DEFAULT true, baslangic_saat SMALLINT, bitis_saat SMALLINT,
+      gorsel TEXT, ikon TEXT, aktif BOOLEAN NOT NULL DEFAULT true, baslangic_saat SMALLINT, bitis_saat SMALLINT,
       indirim_yuzde NUMERIC NOT NULL DEFAULT 0, gecerli_kategoriler JSONB NOT NULL DEFAULT '[]'::jsonb,
       kampanya_tipi TEXT NOT NULL DEFAULT 'surekli', sira INTEGER NOT NULL DEFAULT 0,
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(), guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS revizyon_kayitlari (
+      id BIGSERIAL PRIMARY KEY,
+      yapan_kullanici_id INTEGER REFERENCES kullanicilar(id) ON DELETE SET NULL,
+      yapan_ad TEXT NOT NULL DEFAULT 'Sistem',
+      varlik_turu TEXT NOT NULL,
+      varlik_id TEXT,
+      islem TEXT NOT NULL,
+      aciklama TEXT NOT NULL,
+      eski_deger JSONB,
+      yeni_deger JSONB,
+      olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
@@ -315,6 +328,31 @@ export async function adminTablolariHazirla() {
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS populer BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE kategoriler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE personeller ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE duyurular ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE kampanyalar ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE kampanyalar ADD COLUMN IF NOT EXISTS ikon TEXT");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlamaya_baslandi TIMESTAMPTZ");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazir_at TIMESTAMPTZ");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlayan_personel_id INTEGER");
+  await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapandi_at TIMESTAMPTZ");
+  await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapatan_personel_id INTEGER");
+  await pool.query(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='siparis_hazirlayan_personel_fkey') THEN
+        ALTER TABLE siparis_kalemleri ADD CONSTRAINT siparis_hazirlayan_personel_fkey
+          FOREIGN KEY (hazirlayan_personel_id) REFERENCES personeller(id) ON DELETE SET NULL;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='oturum_kapatan_personel_fkey') THEN
+        ALTER TABLE oturumlar ADD CONSTRAINT oturum_kapatan_personel_fkey
+          FOREIGN KEY (kapatan_personel_id) REFERENCES personeller(id) ON DELETE SET NULL;
+      END IF;
+    END $$;
+    CREATE INDEX IF NOT EXISTS revizyon_kayitlari_tarih_idx ON revizyon_kayitlari (olusturma DESC);
+    CREATE INDEX IF NOT EXISTS siparis_kalemleri_hazirlik_idx
+      ON siparis_kalemleri (olusturma DESC, hazirlamaya_baslandi, hazir_at);
+  `);
   for (const [ad, gorsel, sira] of BASLANGIC_KATEGORILERI) {
     await pool.query(
       `INSERT INTO kategoriler (ad,gorsel,sira) VALUES ($1,$2,$3)
@@ -446,7 +484,7 @@ export async function kategorileriGetir({ tumu = false } = {}) {
   const sonuc = await pool.query(`
     SELECT id,ad,gorsel,sira,aktif
     FROM kategoriler
-    ${tumu ? "" : "WHERE aktif = true"}
+    WHERE arsivli=false ${tumu ? "" : "AND aktif = true"}
     ORDER BY sira, ad
   `);
   return sonuc.rows.map(kategoriDonustur);
@@ -606,7 +644,7 @@ export async function personelleriGetir() {
                 AND v2.giris >= date_trunc('month',NOW())),0) AS aylik_saat
     FROM personeller p
     LEFT JOIN vardiyalar v ON v.personel_id=p.id AND v.cikis IS NULL
-    WHERE p.aktif=true ORDER BY p.ad,p.soyad
+    WHERE p.aktif=true AND p.arsivli=false ORDER BY p.ad,p.soyad
   `);
   return sonuc.rows.map((p) => ({
     ...p,
@@ -700,7 +738,7 @@ export async function vardiyaDegistir(personelId, islem) {
 export async function duyurulariGetir({ tumu = false } = {}) {
   const sonuc = await pool.query(
     `SELECT id,baslik,mesaj,hedef,aktif,olusturma FROM duyurular
-     ${tumu ? "" : "WHERE aktif=true"}
+     WHERE arsivli=false ${tumu ? "" : "AND aktif=true"}
      ORDER BY olusturma DESC LIMIT 30`
   );
   return sonuc.rows;
@@ -720,32 +758,32 @@ export async function duyuruKaydet(veri) {
 }
 
 function kampanyayiDonustur(kampanya) {
-  return { id: Number(kampanya.id), kod: kampanya.kod || null, etiket: kampanya.etiket, baslik: kampanya.baslik, aciklama: kampanya.aciklama, buton: kampanya.buton, butonTipi: kampanya.buton_tipi, gorsel: kampanya.gorsel || null, aktif: kampanya.aktif, baslangicSaat: kampanya.baslangic_saat == null ? null : Number(kampanya.baslangic_saat), bitisSaat: kampanya.bitis_saat == null ? null : Number(kampanya.bitis_saat), indirimYuzde: Number(kampanya.indirim_yuzde || 0), gecerliKategoriler: Array.isArray(kampanya.gecerli_kategoriler) ? kampanya.gecerli_kategoriler : [], kampanyaTipi: kampanya.kampanya_tipi, sira: Number(kampanya.sira || 0) };
+  return { id: Number(kampanya.id), kod: kampanya.kod || null, etiket: kampanya.etiket, baslik: kampanya.baslik, aciklama: kampanya.aciklama, buton: kampanya.buton, butonTipi: kampanya.buton_tipi, gorsel: kampanya.gorsel || null, ikon: kampanya.ikon || null, aktif: kampanya.aktif, baslangicSaat: kampanya.baslangic_saat == null ? null : Number(kampanya.baslangic_saat), bitisSaat: kampanya.bitis_saat == null ? null : Number(kampanya.bitis_saat), indirimYuzde: Number(kampanya.indirim_yuzde || 0), gecerliKategoriler: Array.isArray(kampanya.gecerli_kategoriler) ? kampanya.gecerli_kategoriler : [], kampanyaTipi: kampanya.kampanya_tipi, sira: Number(kampanya.sira || 0) };
 }
 
 export async function kampanyalariGetir({ tumu = false } = {}) {
-  const sonuc = await pool.query(`SELECT * FROM kampanyalar ${tumu ? "" : "WHERE aktif=true"} ORDER BY sira,id`);
+  const sonuc = await pool.query(`SELECT * FROM kampanyalar WHERE arsivli=false ${tumu ? "" : "AND aktif=true"} ORDER BY sira,id`);
   return sonuc.rows.map(kampanyayiDonustur);
 }
 
 export async function kampanyaKaydet(veri) {
   const id = veri.id == null || veri.id === "" ? null : Number(veri.id);
   const etiket = String(veri.etiket || "").trim().slice(0, 80), baslik = String(veri.baslik || "").trim().slice(0, 120), aciklama = String(veri.aciklama || "").trim().slice(0, 600), buton = String(veri.buton || "Sipariş Ver").trim().slice(0, 60);
-  const butonTipi = ["primary", "charcoal"].includes(veri.butonTipi) ? veri.butonTipi : "primary", gorsel = String(veri.gorsel || "").trim().slice(0, 1000) || null, kampanyaTipi = ["surekli", "saatli"].includes(veri.kampanyaTipi) ? veri.kampanyaTipi : "surekli", indirimYuzde = Number(veri.indirimYuzde), sira = Math.floor(Number(veri.sira || 0));
+  const butonTipi = ["primary", "charcoal"].includes(veri.butonTipi) ? veri.butonTipi : "primary", gorsel = String(veri.gorsel || "").trim().slice(0, 1000) || null, ikon = String(veri.ikon || "").trim().replace(/[\u0000-\u001F\u007F]/g, "").slice(0, 16) || null, kampanyaTipi = ["surekli", "saatli"].includes(veri.kampanyaTipi) ? veri.kampanyaTipi : "surekli", indirimYuzde = Number(veri.indirimYuzde), sira = Math.floor(Number(veri.sira || 0));
   const kategoriler = [...new Set((Array.isArray(veri.gecerliKategoriler) ? veri.gecerliKategoriler : []).map((kategori) => String(kategori).trim().slice(0, 80)).filter(Boolean))].slice(0, 30);
   const baslangicSaat = kampanyaTipi === "saatli" ? Number(veri.baslangicSaat) : null, bitisSaat = kampanyaTipi === "saatli" ? Number(veri.bitisSaat) : null;
   if (!etiket || !baslik || !aciklama || !buton) throw new Error("Kampanya etiketi, başlığı, açıklaması ve butonu zorunludur.");
   if (!Number.isFinite(indirimYuzde) || indirimYuzde < 0 || indirimYuzde > 90) throw new Error("İndirim oranı %0–%90 arasında olmalıdır.");
   if (indirimYuzde > 0 && !kategoriler.length) throw new Error("İndirimli kampanya için en az bir kategori seçin.");
   if (kampanyaTipi === "saatli" && (!Number.isInteger(baslangicSaat) || !Number.isInteger(bitisSaat) || baslangicSaat < 0 || bitisSaat > 24 || baslangicSaat >= bitisSaat)) throw new Error("Saatli kampanyada başlangıç ve bitiş saatleri geçersiz.");
-  const alanlar = [etiket, baslik, aciklama, buton, butonTipi, gorsel, veri.aktif !== false, baslangicSaat, bitisSaat, indirimYuzde, JSON.stringify(kategoriler), kampanyaTipi, sira];
-  const sonuc = id ? await pool.query(`UPDATE kampanyalar SET etiket=$1,baslik=$2,aciklama=$3,buton=$4,buton_tipi=$5,gorsel=$6,aktif=$7,baslangic_saat=$8,bitis_saat=$9,indirim_yuzde=$10,gecerli_kategoriler=$11::jsonb,kampanya_tipi=$12,sira=$13,guncelleme=NOW() WHERE id=$14 RETURNING *`, [...alanlar, id]) : await pool.query(`INSERT INTO kampanyalar (etiket,baslik,aciklama,buton,buton_tipi,gorsel,aktif,baslangic_saat,bitis_saat,indirim_yuzde,gecerli_kategoriler,kampanya_tipi,sira) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13) RETURNING *`, alanlar);
+  const alanlar = [etiket, baslik, aciklama, buton, butonTipi, gorsel, ikon, veri.aktif !== false, baslangicSaat, bitisSaat, indirimYuzde, JSON.stringify(kategoriler), kampanyaTipi, sira];
+  const sonuc = id ? await pool.query(`UPDATE kampanyalar SET etiket=$1,baslik=$2,aciklama=$3,buton=$4,buton_tipi=$5,gorsel=$6,ikon=$7,aktif=$8,baslangic_saat=$9,bitis_saat=$10,indirim_yuzde=$11,gecerli_kategoriler=$12::jsonb,kampanya_tipi=$13,sira=$14,guncelleme=NOW() WHERE id=$15 RETURNING *`, [...alanlar, id]) : await pool.query(`INSERT INTO kampanyalar (etiket,baslik,aciklama,buton,buton_tipi,gorsel,ikon,aktif,baslangic_saat,bitis_saat,indirim_yuzde,gecerli_kategoriler,kampanya_tipi,sira) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14) RETURNING *`, alanlar);
   if (!sonuc.rows.length) throw new Error("Kampanya bulunamadı.");
   return kampanyayiDonustur(sonuc.rows[0]);
 }
 
 export async function dashboardGetir() {
-  const [satis, personel, populer] = await Promise.all([
+  const [satis, personel, populer, hazirlik] = await Promise.all([
     pool.query(`SELECT COALESCE(SUM(fiyat*adet),0) toplam,
       COUNT(DISTINCT COALESCE(siparis_no, id::text)) siparis_sayisi
       FROM siparis_kalemleri WHERE olusturma >= date_trunc('day',NOW())`),
@@ -753,6 +791,13 @@ export async function dashboardGetir() {
     pool.query(`SELECT urun_ad, SUM(adet)::int adet, SUM(fiyat*adet) ciro
       FROM siparis_kalemleri WHERE olusturma >= NOW()-INTERVAL '30 days'
       GROUP BY urun_ad ORDER BY adet DESC LIMIT 5`),
+    pool.query(`SELECT
+      ROUND(AVG(EXTRACT(EPOCH FROM (hazir_at-hazirlamaya_baslandi))/60.0) FILTER
+        (WHERE hazir_at IS NOT NULL AND hazirlamaya_baslandi IS NOT NULL),1) AS ortalama_dakika,
+      COUNT(DISTINCT COALESCE(siparis_no,oturum_id::text)) FILTER
+        (WHERE hazir_at IS NOT NULL AND hazirlamaya_baslandi IS NOT NULL
+          AND EXTRACT(EPOCH FROM (hazir_at-hazirlamaya_baslandi))/60.0 > 15)::int AS geciken
+      FROM siparis_kalemleri WHERE olusturma >= NOW()-INTERVAL '30 days'`),
   ]);
   return {
     bugunCiro: Number(satis.rows[0].toplam),
@@ -760,6 +805,8 @@ export async function dashboardGetir() {
     personel: Number(personel.rows[0].toplam),
     vardiyada: Number(personel.rows[0].vardiyada),
     populer: populer.rows.map((p) => ({ ...p, adet: Number(p.adet), ciro: Number(p.ciro) })),
+    ortalamaHazirlamaDakika: hazirlik.rows[0].ortalama_dakika == null ? null : Number(hazirlik.rows[0].ortalama_dakika),
+    gecikenSiparis: Number(hazirlik.rows[0].geciken || 0),
   };
 }
 
@@ -791,5 +838,213 @@ export async function satisRaporuGetir(gun = 30) {
     kategoriler: kategoriler.rows.map((k) => ({ ...k, ciro: Number(k.ciro), adet: Number(k.adet) })),
     saatlik: saatlik.rows.map((s) => ({ ...s, saat: Number(s.saat), adet: Number(s.adet), siparis: Number(s.siparis) })),
     haftalik: haftalik.rows.map((h) => ({ ...h, gun: Number(h.gun), adet: Number(h.adet), ciro: Number(h.ciro) })),
+  };
+}
+
+export async function kategoriArsivle(id) {
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const kategori = await baglanti.query("SELECT ad FROM kategoriler WHERE id=$1 AND arsivli=false FOR UPDATE", [id]);
+    if (!kategori.rows.length) throw new Error("Kategori bulunamadı.");
+    const urun = await baglanti.query(
+      "SELECT 1 FROM urunler WHERE kategori=$1 AND arsivli=false LIMIT 1",
+      [kategori.rows[0].ad]
+    );
+    if (urun.rows.length) throw new Error("İçinde ürün bulunan kategori silinemez. Önce ürünleri taşıyın veya arşivleyin.");
+    await baglanti.query("UPDATE kategoriler SET aktif=false,arsivli=true,guncelleme=NOW() WHERE id=$1", [id]);
+    await baglanti.query("COMMIT");
+  } catch (hata) {
+    await baglanti.query("ROLLBACK");
+    throw hata;
+  } finally {
+    baglanti.release();
+  }
+}
+
+export async function personelArsivle(id) {
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const mevcut = await baglanti.query(
+      "SELECT kullanici_id FROM personeller WHERE id=$1 AND arsivli=false FOR UPDATE",
+      [id]
+    );
+    if (!mevcut.rows.length) throw new Error("Personel bulunamadı.");
+    await baglanti.query("UPDATE vardiyalar SET cikis=COALESCE(cikis,NOW()) WHERE personel_id=$1 AND cikis IS NULL", [id]);
+    await baglanti.query("UPDATE personeller SET aktif=false,arsivli=true WHERE id=$1", [id]);
+    if (mevcut.rows[0].kullanici_id) {
+      await baglanti.query("UPDATE kullanicilar SET rol='pasif' WHERE id=$1", [mevcut.rows[0].kullanici_id]);
+    }
+    await baglanti.query("COMMIT");
+  } catch (hata) {
+    await baglanti.query("ROLLBACK");
+    throw hata;
+  } finally {
+    baglanti.release();
+  }
+}
+
+export async function duyuruArsivle(id) {
+  const sonuc = await pool.query(
+    "UPDATE duyurular SET aktif=false,arsivli=true WHERE id=$1 AND arsivli=false RETURNING id",
+    [id]
+  );
+  if (!sonuc.rows.length) throw new Error("Duyuru bulunamadı.");
+}
+
+export async function kampanyaArsivle(id) {
+  const sonuc = await pool.query(
+    "UPDATE kampanyalar SET aktif=false,arsivli=true,guncelleme=NOW() WHERE id=$1 AND arsivli=false RETURNING id",
+    [id]
+  );
+  if (!sonuc.rows.length) throw new Error("Kampanya bulunamadı.");
+}
+
+const YONETIM_TABLOLARI = {
+  urun: "urunler",
+  kategori: "kategoriler",
+  personel: "personeller",
+  duyuru: "duyurular",
+  kampanya: "kampanyalar",
+  odul: "oduller",
+};
+
+export async function yonetimVarliginiGetir(varlikTuru, id) {
+  const tablo = YONETIM_TABLOLARI[varlikTuru];
+  if (!tablo) return null;
+  const sonuc = await pool.query(`SELECT * FROM ${tablo} WHERE id=$1`, [id]);
+  return sonuc.rows[0] || null;
+}
+
+export async function revizyonKaydet({ yapan, varlikTuru, varlikId, islem, aciklama, eskiDeger = null, yeniDeger = null }) {
+  const yapanAd = [yapan?.ad, yapan?.soyad].filter(Boolean).join(" ").trim() || yapan?.email || "Sistem";
+  await pool.query(
+    `INSERT INTO revizyon_kayitlari
+      (yapan_kullanici_id,yapan_ad,varlik_turu,varlik_id,islem,aciklama,eski_deger,yeni_deger)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb)`,
+    [yapan?.id || null, yapanAd.slice(0, 160), String(varlikTuru).slice(0, 60), varlikId == null ? null : String(varlikId).slice(0, 80), String(islem).slice(0, 40), String(aciklama).slice(0, 500), eskiDeger == null ? null : JSON.stringify(eskiDeger), yeniDeger == null ? null : JSON.stringify(yeniDeger)]
+  );
+}
+
+export async function revizyonKayitlariniGetir({ arama = "", varlikTuru = "", islem = "", baslangic = null, bitis = null, limit = 200 } = {}) {
+  const sonuc = await pool.query(
+    `SELECT id,yapan_ad,varlik_turu,varlik_id,islem,aciklama,eski_deger,yeni_deger,olusturma
+     FROM revizyon_kayitlari
+     WHERE ($1='' OR yapan_ad ILIKE '%'||$1||'%' OR aciklama ILIKE '%'||$1||'%')
+       AND ($2='' OR varlik_turu=$2)
+       AND ($3='' OR islem=$3)
+       AND ($4::timestamptz IS NULL OR olusturma >= $4::timestamptz)
+       AND ($5::timestamptz IS NULL OR olusturma < $5::timestamptz + INTERVAL '1 day')
+     ORDER BY olusturma DESC LIMIT $6`,
+    [String(arama).trim().slice(0, 100), String(varlikTuru).trim().slice(0, 60), String(islem).trim().slice(0, 40), baslangic || null, bitis || null, Math.min(500, Math.max(1, Number(limit) || 200))]
+  );
+  return sonuc.rows;
+}
+
+export async function canliSatislariGetir({ arama = "", durum = "", baslangic = null, bitis = null, limit = 100 } = {}) {
+  const sonuc = await pool.query(
+    `WITH siparisler AS (
+       SELECT COALESCE(k.siparis_no,'LEGACY-'||k.oturum_id::text) AS siparis_no,
+         MIN(o.masa_no) AS masa_no, MIN(k.kisi_adi) AS kisi_adi,
+         SUM(k.fiyat*k.adet) AS tutar, SUM(k.adet)::int AS urun_adedi,
+         MIN(k.olusturma) AS olusturma,
+         CASE WHEN BOOL_AND(k.durum='hazir') THEN 'hazir'
+              WHEN BOOL_OR(k.durum='hazirlaniyor') THEN 'hazirlaniyor' ELSE 'yeni' END AS durum,
+         JSONB_AGG(JSONB_BUILD_OBJECT('ad',k.urun_ad,'adet',k.adet,'fiyat',k.fiyat) ORDER BY k.id) AS urunler
+       FROM siparis_kalemleri k JOIN oturumlar o ON o.id=k.oturum_id
+       GROUP BY COALESCE(k.siparis_no,'LEGACY-'||k.oturum_id::text)
+     )
+     SELECT * FROM siparisler
+     WHERE ($1='' OR siparis_no ILIKE '%'||$1||'%' OR COALESCE(kisi_adi,'') ILIKE '%'||$1||'%' OR COALESCE(masa_no,'') ILIKE '%'||$1||'%')
+       AND ($2='' OR durum=$2)
+       AND ($3::timestamptz IS NULL OR olusturma >= $3::timestamptz)
+       AND ($4::timestamptz IS NULL OR olusturma < $4::timestamptz + INTERVAL '1 day')
+     ORDER BY olusturma DESC LIMIT $5`,
+    [String(arama).trim().slice(0, 100), String(durum).trim(), baslangic || null, bitis || null, Math.min(300, Math.max(1, Number(limit) || 100))]
+  );
+  return sonuc.rows.map((satir) => ({ ...satir, tutar: Number(satir.tutar), urunAdedi: Number(satir.urun_adedi) }));
+}
+
+export async function mutfakKayitlariniGetir({ arama = "", durum = "", personelId = "", baslangic = null, bitis = null, limit = 200 } = {}) {
+  const sonuc = await pool.query(
+    `WITH kayitlar AS (
+       SELECT COALESCE(k.siparis_no,'LEGACY-'||k.oturum_id::text) AS siparis_no,
+         MIN(o.masa_no) AS masa_no, MIN(k.kisi_adi) AS kisi_adi,
+         MIN(k.olusturma) AS siparis_at,
+         MIN(k.hazirlamaya_baslandi) AS baslangic_at, MAX(k.hazir_at) AS hazir_at,
+         CASE WHEN BOOL_AND(k.durum='hazir') THEN 'hazir'
+              WHEN BOOL_OR(k.durum='hazirlaniyor') THEN 'hazirlaniyor' ELSE 'yeni' END AS durum,
+         MAX(k.hazirlayan_personel_id) AS personel_id,
+         MAX(CONCAT_WS(' ',p.ad,p.soyad)) AS personel_ad,
+         SUM(k.adet)::int AS urun_adedi,
+         STRING_AGG(k.urun_ad||' x'||k.adet, ', ' ORDER BY k.id) AS urunler
+       FROM siparis_kalemleri k
+       JOIN oturumlar o ON o.id=k.oturum_id
+       LEFT JOIN personeller p ON p.id=k.hazirlayan_personel_id
+       GROUP BY COALESCE(k.siparis_no,'LEGACY-'||k.oturum_id::text)
+     )
+     SELECT *,
+       CASE WHEN baslangic_at IS NOT NULL THEN ROUND(EXTRACT(EPOCH FROM (COALESCE(hazir_at,NOW())-baslangic_at))/60.0,1) END AS hazirlama_dakika,
+       CASE WHEN hazir_at IS NOT NULL THEN ROUND(EXTRACT(EPOCH FROM (hazir_at-siparis_at))/60.0,1) END AS toplam_dakika
+     FROM kayitlar
+     WHERE ($1='' OR siparis_no ILIKE '%'||$1||'%' OR urunler ILIKE '%'||$1||'%' OR COALESCE(kisi_adi,'') ILIKE '%'||$1||'%')
+       AND ($2='' OR durum=$2)
+       AND ($3='' OR personel_id::text=$3)
+       AND ($4::timestamptz IS NULL OR siparis_at >= $4::timestamptz)
+       AND ($5::timestamptz IS NULL OR siparis_at < $5::timestamptz + INTERVAL '1 day')
+     ORDER BY siparis_at DESC LIMIT $6`,
+    [String(arama).trim().slice(0, 100), String(durum).trim(), String(personelId).trim(), baslangic || null, bitis || null, Math.min(500, Math.max(1, Number(limit) || 200))]
+  );
+  return sonuc.rows.map((satir) => ({
+    ...satir,
+    urunAdedi: Number(satir.urun_adedi),
+    hazirlamaDakika: satir.hazirlama_dakika == null ? null : Number(satir.hazirlama_dakika),
+    toplamDakika: satir.toplam_dakika == null ? null : Number(satir.toplam_dakika),
+  }));
+}
+
+export async function musteriKayitlariniGetir({ arama = "", baslangic = null, bitis = null, limit = 300 } = {}) {
+  const sonuc = await pool.query(
+    `SELECT k.id,k.ad,k.soyad,k.email,k.telefon,k.puan,k.olusturma,
+       COUNT(s.id)::int AS siparis_sayisi, COALESCE(SUM(s.tutar),0) AS toplam_harcama,
+       MAX(s.olusturma) AS son_siparis
+     FROM kullanicilar k LEFT JOIN kullanici_siparisleri s ON s.kullanici_id=k.id
+     WHERE k.rol='kullanici'
+       AND ($1='' OR CONCAT_WS(' ',k.ad,k.soyad) ILIKE '%'||$1||'%' OR k.email ILIKE '%'||$1||'%' OR COALESCE(k.telefon,'') ILIKE '%'||$1||'%')
+       AND ($2::timestamptz IS NULL OR k.olusturma >= $2::timestamptz)
+       AND ($3::timestamptz IS NULL OR k.olusturma < $3::timestamptz + INTERVAL '1 day')
+     GROUP BY k.id ORDER BY k.olusturma DESC LIMIT $4`,
+    [String(arama).trim().slice(0, 100), baslangic || null, bitis || null, Math.min(500, Math.max(1, Number(limit) || 300))]
+  );
+  return sonuc.rows.map((satir) => ({ ...satir, puan: Number(satir.puan), siparisSayisi: Number(satir.siparis_sayisi), toplamHarcama: Number(satir.toplam_harcama) }));
+}
+
+export async function personelKayitlariniGetir({ arama = "", rol = "", personelId = "", baslangic = null, bitis = null, limit = 300 } = {}) {
+  const parametreler = [String(arama).trim().slice(0, 100), String(rol).trim(), String(personelId).trim(), baslangic || null, bitis || null, Math.min(500, Math.max(1, Number(limit) || 300))];
+  const vardiyalar = await pool.query(
+    `SELECT v.id,v.personel_id,v.giris,v.cikis,v.notlar,p.ad,p.soyad,p.rol,
+       ROUND(EXTRACT(EPOCH FROM (COALESCE(v.cikis,NOW())-v.giris))/3600.0,2) AS calisma_saati
+     FROM vardiyalar v JOIN personeller p ON p.id=v.personel_id
+     WHERE ($1='' OR CONCAT_WS(' ',p.ad,p.soyad) ILIKE '%'||$1||'%')
+       AND ($2='' OR p.rol=$2) AND ($3='' OR p.id::text=$3)
+       AND ($4::timestamptz IS NULL OR v.giris >= $4::timestamptz)
+       AND ($5::timestamptz IS NULL OR v.giris < $5::timestamptz + INTERVAL '1 day')
+     ORDER BY v.giris DESC LIMIT $6`, parametreler
+  );
+  const performans = await pool.query(
+    `SELECT p.id,p.ad,p.soyad,p.rol,
+       COUNT(DISTINCT COALESCE(k.siparis_no,k.oturum_id::text)) FILTER (WHERE k.hazir_at IS NOT NULL)::int AS hazirlanan_siparis,
+       ROUND(AVG(EXTRACT(EPOCH FROM (k.hazir_at-k.hazirlamaya_baslandi))/60.0) FILTER (WHERE k.hazir_at IS NOT NULL AND k.hazirlamaya_baslandi IS NOT NULL),1) AS ortalama_dakika
+     FROM personeller p LEFT JOIN siparis_kalemleri k ON k.hazirlayan_personel_id=p.id
+       AND ($4::timestamptz IS NULL OR k.olusturma >= $4::timestamptz)
+       AND ($5::timestamptz IS NULL OR k.olusturma < $5::timestamptz + INTERVAL '1 day')
+     WHERE p.arsivli=false AND ($1='' OR CONCAT_WS(' ',p.ad,p.soyad) ILIKE '%'||$1||'%')
+       AND ($2='' OR p.rol=$2) AND ($3='' OR p.id::text=$3)
+     GROUP BY p.id ORDER BY hazirlanan_siparis DESC`, parametreler.slice(0, 5)
+  );
+  return {
+    vardiyalar: vardiyalar.rows.map((satir) => ({ ...satir, calismaSaati: Number(satir.calisma_saati) })),
+    performans: performans.rows.map((satir) => ({ ...satir, hazirlananSiparis: Number(satir.hazirlanan_siparis), ortalamaDakika: satir.ortalama_dakika == null ? null : Number(satir.ortalama_dakika) })),
   };
 }

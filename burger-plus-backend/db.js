@@ -85,6 +85,11 @@ export async function tablolariHazirla() {
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS odeme_id UUID");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS odeme_kalem_no INTEGER");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS siparis_no TEXT");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlamaya_baslandi TIMESTAMPTZ");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazir_at TIMESTAMPTZ");
+  await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlayan_personel_id INTEGER");
+  await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapandi_at TIMESTAMPTZ");
+  await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapatan_personel_id INTEGER");
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS tek_odeme_siparis_kalemi
     ON siparis_kalemleri (odeme_id, odeme_kalem_no)
@@ -755,7 +760,7 @@ function odemeDonustur(odeme) {
 }
 
 // Mutfak: bir masanin tum kalemlerini belirli duruma gecir.
-export async function masaDurumGuncelle(masaNo, durum) {
+export async function masaDurumGuncelle(masaNo, durum, kullaniciId = null) {
   const oturum = await pool.query(
     "SELECT * FROM oturumlar WHERE masa_no = $1 AND durum = 'acik' ORDER BY id DESC LIMIT 1",
     [masaNo]
@@ -767,10 +772,34 @@ export async function masaDurumGuncelle(masaNo, durum) {
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
-    const kalemler = await baglanti.query(
-      "UPDATE siparis_kalemleri SET durum=$1 WHERE oturum_id=$2 RETURNING siparis_no",
-      [durum, oturum.rows[0].id]
-    );
+    const personel = kullaniciId
+      ? await baglanti.query("SELECT id FROM personeller WHERE kullanici_id=$1 AND aktif=true AND arsivli=false LIMIT 1", [kullaniciId])
+      : { rows: [] };
+    const personelId = personel.rows[0]?.id || null;
+    let kalemler;
+    if (durum === "hazirlaniyor") {
+      kalemler = await baglanti.query(
+        `UPDATE siparis_kalemleri SET durum=$1,
+           hazirlamaya_baslandi=COALESCE(hazirlamaya_baslandi,NOW()),
+           hazirlayan_personel_id=COALESCE($3,hazirlayan_personel_id)
+         WHERE oturum_id=$2 RETURNING siparis_no`,
+        [durum, oturum.rows[0].id, personelId]
+      );
+    } else if (durum === "hazir") {
+      kalemler = await baglanti.query(
+        `UPDATE siparis_kalemleri SET durum=$1,
+           hazirlamaya_baslandi=COALESCE(hazirlamaya_baslandi,NOW()),
+           hazir_at=COALESCE(hazir_at,NOW()),
+           hazirlayan_personel_id=COALESCE($3,hazirlayan_personel_id)
+         WHERE oturum_id=$2 RETURNING siparis_no`,
+        [durum, oturum.rows[0].id, personelId]
+      );
+    } else {
+      kalemler = await baglanti.query(
+        "UPDATE siparis_kalemleri SET durum=$1 WHERE oturum_id=$2 RETURNING siparis_no",
+        [durum, oturum.rows[0].id]
+      );
+    }
     const siparisNolari = [...new Set(kalemler.rows
       .map((kalem) => kalem.siparis_no)
       .filter(Boolean))];
@@ -802,13 +831,16 @@ export async function tumAcikMasalar() {
 // Salon personeli: masayi kapatir (musteriler kalkinca).
 // Oturum 'kapali' olur; siparisler SILINMEZ (rapor icin arsivde kalir),
 // ama yeni gelen musteri temiz masayla baslar (yeni oturum acilir).
-export async function masaKapat(masaNo) {
+export async function masaKapat(masaNo, kullaniciId = null) {
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
+    const personel = kullaniciId
+      ? await baglanti.query("SELECT id FROM personeller WHERE kullanici_id=$1 AND aktif=true AND arsivli=false LIMIT 1", [kullaniciId])
+      : { rows: [] };
     const oturumlar = await baglanti.query(
-      "UPDATE oturumlar SET durum='kapali' WHERE masa_no=$1 AND durum='acik' RETURNING id",
-      [masaNo]
+      "UPDATE oturumlar SET durum='kapali',kapandi_at=NOW(),kapatan_personel_id=$2 WHERE masa_no=$1 AND durum='acik' RETURNING id",
+      [masaNo, personel.rows[0]?.id || null]
     );
     const oturumIdleri = oturumlar.rows.map((satir) => satir.id);
     if (oturumIdleri.length) {
