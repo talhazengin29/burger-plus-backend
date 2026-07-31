@@ -113,8 +113,15 @@ const corsAyarlari = {
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
+// İyzico'nun ödeme sayfası callback'i tarayıcıdan otomatik form-post ile
+// gönderir; bu istek kendi domainini Origin header'ında taşır ve frontend
+// allowlist'inde olmadığı için engellenirdi. Bu rota bizim JS'imizden değil
+// doğrudan İyzico'dan geldiği için origin allowlist'inin dışında tutulur.
 app.use(helmet({ crossOriginResourcePolicy: false }));
-app.use(cors(corsAyarlari));
+app.use((req, res, next) => {
+  if (req.path === "/api/odeme/iyzico/callback") return next();
+  cors(corsAyarlari)(req, res, next);
+});
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false, limit: "20kb" }));
 const genelApiLimiti = rateLimit({
