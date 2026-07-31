@@ -108,7 +108,23 @@ app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cors(corsAyarlari));
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false, limit: "20kb" }));
-app.use("/api", rateLimit({ windowMs: 60_000, limit: 180, standardHeaders: "draft-8", legacyHeaders: false }));
+const genelApiLimiti = rateLimit({
+  windowMs: 60_000,
+  limit: URETIM ? 300 : 1200,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  skip: (req) => req.originalUrl.startsWith("/api/admin/"),
+  message: { hata: "Çok fazla istek gönderildi. Lütfen kısa süre sonra tekrar deneyin." },
+});
+const yonetimApiLimiti = rateLimit({
+  windowMs: 60_000,
+  limit: URETIM ? 600 : 1800,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { hata: "Yönetim paneli istek sınırına ulaştı. Lütfen kısa süre sonra tekrar deneyin." },
+});
+app.use("/api/admin", yonetimApiLimiti);
+app.use("/api", genelApiLimiti);
 const kimlikLimiti = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false });
 
 const httpServer = createServer(app);
