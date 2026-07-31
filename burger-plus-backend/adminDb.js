@@ -812,8 +812,9 @@ export async function dashboardGetir() {
 
 export async function satisRaporuGetir(gun = 30) {
   const aralik = Math.min(365, Math.max(1, sayi(gun, 30)));
-  const [gunluk, urunler, kategoriler, saatlik, haftalik] = await Promise.all([
-    pool.query(`SELECT date_trunc('day',olusturma)::date gun, SUM(fiyat*adet) ciro, SUM(adet) adet
+  const [gunluk, urunler, kategoriler, saatlik, haftalik, ozet, oncekiOzet] = await Promise.all([
+    pool.query(`SELECT date_trunc('day',olusturma)::date gun, SUM(fiyat*adet) ciro, SUM(adet) adet,
+        COUNT(DISTINCT COALESCE(siparis_no,id::text))::int siparis
       FROM siparis_kalemleri WHERE olusturma >= NOW()-($1::text || ' days')::interval
       GROUP BY 1 ORDER BY 1`, [aralik]),
     pool.query(`SELECT urun_ad, SUM(adet) adet, SUM(fiyat*adet) ciro
@@ -831,13 +832,27 @@ export async function satisRaporuGetir(gun = 30) {
         SUM(fiyat*adet) ciro
       FROM siparis_kalemleri WHERE olusturma >= NOW()-($1::text || ' days')::interval
       GROUP BY 1 ORDER BY 1`, [aralik]),
+    // Genel dönem toplamı: ürün adedinden bağımsız gerçek sipariş sayısı burada çıkar (ortalama sepet tutarı için).
+    pool.query(`SELECT COALESCE(SUM(fiyat*adet),0) ciro, COALESCE(SUM(adet),0)::int adet,
+        COUNT(DISTINCT COALESCE(siparis_no,id::text))::int siparis
+      FROM siparis_kalemleri WHERE olusturma >= NOW()-($1::text || ' days')::interval`, [aralik]),
+    // Bir önceki eşit uzunluktaki dönem: kutucuklardaki trend karşılaştırması için.
+    pool.query(`SELECT COALESCE(SUM(fiyat*adet),0) ciro, COALESCE(SUM(adet),0)::int adet,
+        COUNT(DISTINCT COALESCE(siparis_no,id::text))::int siparis
+      FROM siparis_kalemleri
+      WHERE olusturma >= NOW()-($1::text || ' days')::interval
+        AND olusturma < NOW()-($2::text || ' days')::interval`, [String(aralik * 2), aralik]),
   ]);
   return {
-    gunluk: gunluk.rows.map((g) => ({ ...g, ciro: Number(g.ciro), adet: Number(g.adet) })),
+    gunluk: gunluk.rows.map((g) => ({ ...g, ciro: Number(g.ciro), adet: Number(g.adet), siparis: Number(g.siparis) })),
     urunler: urunler.rows.map((u) => ({ ...u, ciro: Number(u.ciro), adet: Number(u.adet) })),
     kategoriler: kategoriler.rows.map((k) => ({ ...k, ciro: Number(k.ciro), adet: Number(k.adet) })),
     saatlik: saatlik.rows.map((s) => ({ ...s, saat: Number(s.saat), adet: Number(s.adet), siparis: Number(s.siparis) })),
     haftalik: haftalik.rows.map((h) => ({ ...h, gun: Number(h.gun), adet: Number(h.adet), ciro: Number(h.ciro) })),
+    ozet: { ciro: Number(ozet.rows[0].ciro), adet: Number(ozet.rows[0].adet), siparis: Number(ozet.rows[0].siparis) },
+    oncekiOzet: {
+      ciro: Number(oncekiOzet.rows[0].ciro), adet: Number(oncekiOzet.rows[0].adet), siparis: Number(oncekiOzet.rows[0].siparis),
+    },
   };
 }
 
