@@ -5,12 +5,17 @@
 
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { randomBytes, createHash } from "crypto";
 import {
   kullaniciOlustur,
   kullaniciBulEmail,
   kullaniciBulId,
   davetKoduylaKullaniciBul,
+  sifreSifirlamaTalebiOlustur,
+  sifreSifirlamaTokeniGecerliMi,
+  sifreyiSifirla as sifreyiSifirlaDb,
 } from "./db.js";
+import { sifirlamaEpostasiGonder } from "./eposta.js";
 
 // JWT gizli anahtari. Gercek uretimde .env'den gelmeli ve gizli olmali.
 const URETIM = process.env.NODE_ENV === "production";
@@ -113,7 +118,12 @@ export async function tokenDogrula(token) {
   try {
     const cozulmus = jwt.verify(token, JWT_SECRET);
     const kullanici = await kullaniciBulId(cozulmus.id);
-    return kullanici; // null olabilir (silinmis kullanici)
+    if (!kullanici) return null; // silinmis kullanici
+    // Sifre degistirildiyse, degisiklikten once uretilmis token'lar artik gecersizdir.
+    if (kullanici.sifreDegisimTarihi && cozulmus.iat * 1000 < new Date(kullanici.sifreDegisimTarihi).getTime()) {
+      return null;
+    }
+    return kullanici;
   } catch {
     return null; // gecersiz/suresi dolmus token
   }
@@ -176,4 +186,50 @@ export function rolMiddleware(izinliRoller = []) {
     req.kullanici = kullanici;
     next();
   };
+}
+
+// --- Sifremi unuttum ---
+const SIFIRLAMA_SURESI_DK = 30;
+
+function tokenHashla(token) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+// Kullanici var/yok bilgisi disari sizdirilmaz: bu fonksiyon her zaman
+// sessizce doner, cagiran route her durumda ayni mesaji yanitlar.
+export async function sifirlamaTalepEt(email) {
+  const temizEmail = String(email || "").trim().toLowerCase().slice(0, 254);
+  if (!emailGecerli(temizEmail)) return;
+  const kullanici = await kullaniciBulEmail(temizEmail);
+  if (!kullanici) return;
+
+  try {
+    const duzToken = randomBytes(32).toString("hex");
+    await sifreSifirlamaTalebiOlustur(kullanici.id, tokenHashla(duzToken), SIFIRLAMA_SURESI_DK);
+    const frontendUrl = String(process.env.FRONTEND_URL || "").trim().replace(/\/$/, "");
+    const link = `${frontendUrl}/sifre-sifirla?token=${duzToken}`;
+    await sifirlamaEpostasiGonder(kullanici.email, kullanici.ad, link);
+  } catch (e) {
+    // Saglayici/e-posta hatasi disariya sizdirilmaz, yalnizca sunucu loguna yazilir.
+    console.error("Şifre sıfırlama e-postası gönderilemedi:", e.message);
+  }
+}
+
+export async function sifirlamaTokenGecerliMi(token) {
+  const temiz = String(token || "").trim();
+  if (!temiz) return false;
+  return sifreSifirlamaTokeniGecerliMi(tokenHashla(temiz));
+}
+
+export async function sifreyiSifirla(token, yeniSifre) {
+  const temizToken = String(token || "").trim();
+  const sifre = String(yeniSifre || "");
+  if (!temizToken) return { hata: "Bağlantı geçersiz veya süresi dolmuş." };
+  if (sifre.length < 6) return { hata: "Şifre en az 6 karakter olmalıdır." };
+  if (sifre.length > 72) return { hata: "Şifre en fazla 72 karakter olabilir." };
+
+  const sifreHash = await bcrypt.hash(sifre, 10);
+  const sonuc = await sifreyiSifirlaDb(tokenHashla(temizToken), sifreHash);
+  if (sonuc.gecersiz) return { hata: "Bağlantı geçersiz veya süresi dolmuş." };
+  return { basarili: true };
 }

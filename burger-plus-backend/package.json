@@ -20,6 +20,7 @@
     "iyzipay": "^2.0.69",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.22.0",
+    "resend": "^6.18.1",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
   },

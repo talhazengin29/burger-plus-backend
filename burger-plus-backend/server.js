@@ -68,6 +68,7 @@ import { gorselYukle } from "./storage.js";
 import {
   kayitOl, girisYap, korumaliMiddleware, adminMiddleware, rolMiddleware,
   opsiyonelKullaniciMiddleware, tokenDogrula,
+  sifirlamaTalepEt, sifirlamaTokenGecerliMi, sifreyiSifirla,
 } from "./auth.js";
 import {
   sadakatTablolariHazirla, sadakatOzetiniGetir, puanlaOdulSatinAl,
@@ -142,6 +143,10 @@ const yonetimApiLimiti = rateLimit({
 app.use("/api/admin", yonetimApiLimiti);
 app.use("/api", genelApiLimiti);
 const kimlikLimiti = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false });
+const sifreSifirlamaLimiti = rateLimit({
+  windowMs: 15 * 60_000, limit: 5, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla istek gönderildi. Lütfen kısa süre sonra tekrar deneyin." },
+});
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -161,6 +166,22 @@ app.post("/api/kayit", kimlikLimiti, async (req, res) => {
 app.post("/api/giris", kimlikLimiti, async (req, res) => {
   const sonuc = await girisYap(req.body);
   if (sonuc.hata) return res.status(401).json(sonuc);
+  res.json(sonuc);
+});
+
+// Sifremi unuttum: talep her zaman ayni mesajla doner (kullanici sizdirmaz).
+app.post("/api/sifre-sifirlama-talep", sifreSifirlamaLimiti, async (req, res) => {
+  await sifirlamaTalepEt(req.body?.email);
+  res.json({ mesaj: "E-posta adresiniz kayıtlıysa sıfırlama bağlantısı gönderildi." });
+});
+
+app.get("/api/sifre-sifirla/dogrula", async (req, res) => {
+  res.json({ gecerli: await sifirlamaTokenGecerliMi(req.query?.token) });
+});
+
+app.post("/api/sifre-sifirla", async (req, res) => {
+  const sonuc = await sifreyiSifirla(req.body?.token, req.body?.yeniSifre);
+  if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
 

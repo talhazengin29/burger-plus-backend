@@ -113,6 +113,21 @@ export async function tablolariHazirla() {
     )
   `);
 
+  // Şifremi unuttum akışı: şifre değişince o ana kadar üretilmiş JWT'ler
+  // tokenDogrula içinde bu tarihle karşılaştırılıp geçersiz sayılır.
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS sifre_degisim_tarihi TIMESTAMPTZ");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sifre_sifirlama (
+      id SERIAL PRIMARY KEY,
+      kullanici_id INTEGER NOT NULL REFERENCES kullanicilar(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
+      son_gecerlilik TIMESTAMPTZ NOT NULL,
+      kullanildi BOOLEAN NOT NULL DEFAULT false,
+      olusturma TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS sifre_sifirlama_token ON sifre_sifirlama(token_hash)");
+
   // Davet sistemi migration'ı: her hesap kalıcı ve benzersiz bir kod taşır;
   // davetçi ilişkisi kayıt anında bir kez yazılır ve sonradan değiştirilmez.
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS davet_kodu VARCHAR(8)");
@@ -906,10 +921,64 @@ export async function kullaniciBulEmail(email) {
 // ID ile kullanici bul (token dogrulamasi sonrasi; sifre_hash HARIC).
 export async function kullaniciBulId(id) {
   const sonuc = await pool.query(
-    "SELECT id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu,burger_damga FROM kullanicilar WHERE id=$1",
+    "SELECT id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu,burger_damga,sifre_degisim_tarihi FROM kullanicilar WHERE id=$1",
     [id]
   );
   return sonuc.rows[0] ? kullaniciDonustur(sonuc.rows[0]) : null;
+}
+
+// Şifremi unuttum: yeni sıfırlama talebi kaydeder, kullanıcının önceki
+// kullanılmamış token'larını iptal eder (aynı anda yalnızca bir bağlantı geçerli).
+export async function sifreSifirlamaTalebiOlustur(kullaniciId, tokenHash, sureDk = 30) {
+  await pool.query(
+    "UPDATE sifre_sifirlama SET kullanildi=true WHERE kullanici_id=$1 AND kullanildi=false",
+    [kullaniciId]
+  );
+  await pool.query(
+    `INSERT INTO sifre_sifirlama (kullanici_id, token_hash, son_gecerlilik)
+     VALUES ($1, $2, NOW() + ($3::text || ' minutes')::interval)`,
+    [kullaniciId, tokenHash, sureDk]
+  );
+}
+
+export async function sifreSifirlamaTokeniGecerliMi(tokenHash) {
+  const sonuc = await pool.query(
+    "SELECT 1 FROM sifre_sifirlama WHERE token_hash=$1 AND kullanildi=false AND son_gecerlilik > NOW()",
+    [tokenHash]
+  );
+  return sonuc.rows.length > 0;
+}
+
+// Token'ı doğrular, şifreyi günceller ve token'ı tek seferlik kullanılmış
+// işaretler — hepsi tek transaction içinde (yarış durumuna karşı FOR UPDATE).
+export async function sifreyiSifirla(tokenHash, yeniSifreHash) {
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const token = await baglanti.query(
+      `SELECT id, kullanici_id FROM sifre_sifirlama
+       WHERE token_hash=$1 AND kullanildi=false AND son_gecerlilik > NOW()
+       FOR UPDATE`,
+      [tokenHash]
+    );
+    if (!token.rows.length) {
+      await baglanti.query("ROLLBACK");
+      return { gecersiz: true };
+    }
+    const { id, kullanici_id: kullaniciId } = token.rows[0];
+    await baglanti.query(
+      "UPDATE kullanicilar SET sifre_hash=$1, sifre_degisim_tarihi=NOW() WHERE id=$2",
+      [yeniSifreHash, kullaniciId]
+    );
+    await baglanti.query("UPDATE sifre_sifirlama SET kullanildi=true WHERE id=$1", [id]);
+    await baglanti.query("COMMIT");
+    return { basarili: true };
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
 }
 
 export async function davetKoduylaKullaniciBul(davetKodu) {
@@ -995,6 +1064,7 @@ function kullaniciDonustur(kullanici) {
     puan: Number(kullanici.puan || 0),
     burgerDamga: Number(kullanici.burger_damga || 0),
     davetKodu: kullanici.davet_kodu,
+    sifreDegisimTarihi: kullanici.sifre_degisim_tarihi,
   };
 }
 
