@@ -11,6 +11,53 @@ function isletmeIdZorunlu(isletmeId) {
   return id;
 }
 
+async function yeKazanOdulunuBulVeyaOlustur(isletmeId, baglanti, tercihEdilenUrunId = null) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const mevcut = await baglanti.query(
+    `SELECT o.id FROM oduller o
+     JOIN urunler u ON u.isletme_id=$1 AND u.id=o.urun_id
+     WHERE o.isletme_id=$1 AND o.kod='ye-kazan-burger'
+       AND u.aktif=true AND u.arsivli=false
+     LIMIT 1`,
+    [tenantId]
+  );
+  if (mevcut.rows.length) {
+    await baglanti.query(
+      "UPDATE oduller SET aktif=true,arsivli=false,market_aktif=false,guncelleme=NOW() WHERE isletme_id=$1 AND id=$2",
+      [tenantId, mevcut.rows[0].id]
+    );
+    return Number(mevcut.rows[0].id);
+  }
+
+  const tercihId = Number(tercihEdilenUrunId);
+  const urun = await baglanti.query(
+    `SELECT id,gorsel FROM urunler
+     WHERE isletme_id=$1 AND kategori='Burgerler' AND aktif=true AND arsivli=false
+       AND ($2::int IS NULL OR id=$2)
+     ORDER BY id LIMIT 1`,
+    [tenantId, Number.isSafeInteger(tercihId) && tercihId > 0 ? tercihId : null]
+  );
+  const secilenUrun = urun.rows[0] || (await baglanti.query(
+    `SELECT id,gorsel FROM urunler
+     WHERE isletme_id=$1 AND kategori='Burgerler' AND aktif=true AND arsivli=false
+     ORDER BY id LIMIT 1`,
+    [tenantId]
+  )).rows[0];
+  if (!secilenUrun) return null;
+
+  const sonuc = await baglanti.query(
+    `INSERT INTO oduller
+      (isletme_id,kod,ad,puan,urun_id,gorsel,market_aktif,aktif,arsivli)
+     VALUES ($1,'ye-kazan-burger','Ye Kazan Burger Hediyesi',0,$2,$3,false,true,false)
+     ON CONFLICT (isletme_id,kod) DO UPDATE SET
+       urun_id=EXCLUDED.urun_id,gorsel=EXCLUDED.gorsel,
+       market_aktif=false,aktif=true,arsivli=false,guncelleme=NOW()
+     RETURNING id`,
+    [tenantId, secilenUrun.id, secilenUrun.gorsel || null]
+  );
+  return Number(sonuc.rows[0].id);
+}
+
 export async function sadakatTablolariHazirla(isletmeId, pool) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS burger_damga INTEGER NOT NULL DEFAULT 0");
@@ -87,6 +134,8 @@ export async function sadakatTablolariHazirla(isletmeId, pool) {
       SELECT 1 FROM urunler u WHERE u.isletme_id=$1 AND u.id=o.urun_id AND u.arsivli=true
     )
   `, [tenantId]);
+
+  await yeKazanOdulunuBulVeyaOlustur(tenantId, pool);
 
   await eskiSadakatiAktar(tenantId, pool);
 }
@@ -301,20 +350,31 @@ export async function odemeSadakatiniUygula(isletmeId, baglanti, odeme) {
   const kullanici = await baglanti.query("SELECT burger_damga FROM kullanicilar WHERE isletme_id=$1 AND id=$2 FOR UPDATE", [tenantId, odeme.kullanici_id]);
   if (!kullanici.rows.length) throw new Error("Kullanıcı bulunamadı.");
   const toplam = Number(kullanici.rows[0]?.burger_damga || 0) + burgerAdet;
-  const kazanilanHediye = Math.floor(toplam / BURGER_DAMGA_HEDEFI);
-  const burgerDamga = toplam % BURGER_DAMGA_HEDEFI;
-  await baglanti.query("UPDATE kullanicilar SET burger_damga=$1 WHERE isletme_id=$2 AND id=$3", [burgerDamga, tenantId, odeme.kullanici_id]);
+  let kazanilanHediye = Math.floor(toplam / BURGER_DAMGA_HEDEFI);
+  let burgerDamga = toplam % BURGER_DAMGA_HEDEFI;
+  let odulId = null;
 
   if (kazanilanHediye > 0) {
-    const odul = await baglanti.query("SELECT id FROM oduller WHERE isletme_id=$1 AND kod='ye-kazan-burger' AND aktif=true", [tenantId]);
-    if (!odul.rows.length) throw new Error("Ye Kazan ödülü yapılandırılmamış.");
+    const burgerUrunu = odeme.urunler.find((urun) => urun.kategori === "Burgerler");
+    odulId = await yeKazanOdulunuBulVeyaOlustur(tenantId, baglanti, burgerUrunu?.id);
+    // Ürün kataloğu olağan dışı biçimde boşsa ödeme yine tamamlanır. Kullanıcının
+    // ilerlemesi dört damgada korunur ve ürün düzeltildiğinde sonraki siparişte ödül kazanır.
+    if (!odulId) {
+      kazanilanHediye = 0;
+      burgerDamga = Math.min(BURGER_DAMGA_HEDEFI - 1, toplam);
+    }
+  }
+
+  await baglanti.query("UPDATE kullanicilar SET burger_damga=$1 WHERE isletme_id=$2 AND id=$3", [burgerDamga, tenantId, odeme.kullanici_id]);
+
+  if (kazanilanHediye > 0 && odulId) {
     for (let sira = 1; sira <= kazanilanHediye; sira += 1) {
       await baglanti.query(
         `INSERT INTO kullanici_odulleri
           (isletme_id,kullanici_id,odul_id,kaynak_tur,harcanan_puan,kaynak_odeme_id,kaynak_sira)
          VALUES ($1,$2,$3,'ye_kazan',0,$4,$5)
          ON CONFLICT (kaynak_odeme_id,kaynak_sira) DO NOTHING`,
-        [tenantId, odeme.kullanici_id, odul.rows[0].id, odeme.id, sira]
+        [tenantId, odeme.kullanici_id, odulId, odeme.id, sira]
       );
     }
   }
