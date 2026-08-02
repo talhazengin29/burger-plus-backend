@@ -69,6 +69,8 @@ import {
   kayitOl, girisYap, korumaliMiddleware, adminMiddleware, rolMiddleware,
   opsiyonelKullaniciMiddleware, tokenDogrula,
   sifirlamaTalepEt, sifirlamaTokenGecerliMi, sifreyiSifirla,
+  ikiFaktorGirisiniTamamla, ikiFaktorKurulumBaslat,
+  ikiFaktorKurulumOnayla, ikiFaktorDevreDisiBirak,
 } from "./auth.js";
 import {
   sadakatTablolariHazirla, sadakatOzetiniGetir, puanlaOdulSatinAl,
@@ -147,6 +149,10 @@ const sifreSifirlamaLimiti = rateLimit({
   windowMs: 15 * 60_000, limit: 5, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla istek gönderildi. Lütfen kısa süre sonra tekrar deneyin." },
 });
+const ikiFaktorLimiti = rateLimit({
+  windowMs: 10 * 60_000, limit: 15, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla iki adımlı doğrulama denemesi yapıldı. Lütfen daha sonra tekrar deneyin." },
+});
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -165,6 +171,12 @@ app.post("/api/kayit", kimlikLimiti, async (req, res) => {
 // Giris yap
 app.post("/api/giris", kimlikLimiti, async (req, res) => {
   const sonuc = await girisYap(req.body);
+  if (sonuc.hata) return res.status(401).json(sonuc);
+  res.json(sonuc);
+});
+
+app.post("/api/giris/2fa", ikiFaktorLimiti, async (req, res) => {
+  const sonuc = await ikiFaktorGirisiniTamamla(req.body?.ikiFaktorToken, req.body?.kod);
   if (sonuc.hata) return res.status(401).json(sonuc);
   res.json(sonuc);
 });
@@ -188,6 +200,24 @@ app.post("/api/sifre-sifirla", async (req, res) => {
 // Ben kimim (token ile guncel kullanici bilgisi — sayfa yenilenince oturum korunur)
 app.get("/api/ben", korumaliMiddleware(), (req, res) => {
   res.json({ kullanici: req.kullanici });
+});
+
+app.post("/api/2fa/kurulum-baslat", ikiFaktorLimiti, korumaliMiddleware(), async (req, res) => {
+  const sonuc = await ikiFaktorKurulumBaslat(req.kullanici.id, req.body?.sifre);
+  if (sonuc.hata) return res.status(400).json(sonuc);
+  res.json(sonuc);
+});
+
+app.post("/api/2fa/kurulum-onayla", ikiFaktorLimiti, korumaliMiddleware(), async (req, res) => {
+  const sonuc = await ikiFaktorKurulumOnayla(req.kullanici.id, req.body?.kod);
+  if (sonuc.hata) return res.status(400).json(sonuc);
+  res.json(sonuc);
+});
+
+app.post("/api/2fa/kapat", ikiFaktorLimiti, korumaliMiddleware(), async (req, res) => {
+  const sonuc = await ikiFaktorDevreDisiBirak(req.kullanici.id, req.body?.sifre, req.body?.kod);
+  if (sonuc.hata) return res.status(400).json(sonuc);
+  res.json(sonuc);
 });
 
 app.get("/api/davetim", korumaliMiddleware(), async (req, res) => {

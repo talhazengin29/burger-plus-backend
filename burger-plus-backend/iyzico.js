@@ -29,26 +29,36 @@ function ayarlar() {
   const uri = mutlakTemelUrl(ortamDegeri("IYZICO_BASE_URL") || "https://sandbox-api.iyzipay.com", "IYZICO_BASE_URL");
   const backendUrl = mutlakTemelUrl(ortamDegeri("PUBLIC_BACKEND_URL") || ortamDegeri("RENDER_EXTERNAL_URL"), "PUBLIC_BACKEND_URL");
   const frontendUrl = mutlakTemelUrl(ortamDegeri("FRONTEND_URL"), "FRONTEND_URL");
+  const varsayilanKimlikNo = ortamDegeri("IYZICO_DEFAULT_IDENTITY_NUMBER") || "11111111111";
+  const varsayilanAdres = ortamDegeri("IYZICO_DEFAULT_ADDRESS");
+  const varsayilanIl = ortamDegeri("IYZICO_DEFAULT_CITY");
+  const varsayilanPostaKodu = ortamDegeri("IYZICO_DEFAULT_ZIP_CODE") || "00000";
   if (!apiKey || !secretKey) throw new Error("İyzico API anahtarları backend ortam değişkenlerinde tanımlı değil.");
   if (!backendUrl || !frontendUrl) throw new Error("PUBLIC_BACKEND_URL ve FRONTEND_URL ödeme callback'i için tanımlı olmalı.");
-  return { apiKey, secretKey, uri, backendUrl, frontendUrl };
+  if (!/^\d{11}$/.test(varsayilanKimlikNo)) throw new Error("IYZICO_DEFAULT_IDENTITY_NUMBER 11 rakam olmalı.");
+  if (!varsayilanAdres || !varsayilanIl) {
+    throw new Error("Müşteriden adres istemeden ödeme almak için IYZICO_DEFAULT_ADDRESS ve IYZICO_DEFAULT_CITY tanımlanmalı.");
+  }
+  return {
+    apiKey, secretKey, uri, backendUrl, frontendUrl,
+    varsayilanKimlikNo, varsayilanAdres, varsayilanIl, varsayilanPostaKodu,
+  };
 }
 
-function aliciDogrula(alici = {}) {
+function aliciDogrula(alici = {}, config) {
   const veri = {
     ad: String(alici.ad || "").trim().slice(0, 80),
     soyad: String(alici.soyad || "").trim().slice(0, 80),
     email: String(alici.email || "").trim().toLowerCase().slice(0, 160),
     telefon: String(alici.telefon || "").replace(/\s/g, "").slice(0, 20),
-    kimlikNo: String(alici.kimlikNo || "").replace(/\s/g, "").slice(0, 20),
-    adres: String(alici.adres || "").trim().slice(0, 300),
-    il: String(alici.il || "").trim().slice(0, 80),
-    postaKodu: String(alici.postaKodu || "").trim().slice(0, 16),
+    kimlikNo: config.varsayilanKimlikNo,
+    adres: config.varsayilanAdres.slice(0, 300),
+    il: config.varsayilanIl.slice(0, 80),
+    postaKodu: config.varsayilanPostaKodu.slice(0, 16),
   };
-  if (!veri.ad || !veri.soyad || !/^\S+@\S+\.\S+$/.test(veri.email) || !veri.adres || !veri.il) {
-    throw new Error("Ödeme için ad, soyad, e-posta, il ve adres bilgisi gerekli.");
+  if (!veri.ad || !veri.soyad || !/^\S+@\S+\.\S+$/.test(veri.email)) {
+    throw new Error("Ödeme için ad, soyad ve e-posta bilgisi gerekli.");
   }
-  if (!/^\d{11}$/.test(veri.kimlikNo)) throw new Error("Ödeme için 11 haneli T.C. kimlik numarası gerekli.");
   if (!/^\+?90\d{10}$/.test(veri.telefon.replace(/^00/, "+"))) throw new Error("Telefon numarasını +905XXXXXXXXX biçiminde gir.");
   return veri;
 }
@@ -73,7 +83,7 @@ function iyzicoCagir(kaynak, metod, istek) {
 
 export async function iyzicoCheckoutBaslat(odeme, alici, istemciIp) {
   const config = ayarlar();
-  const kisi = aliciDogrula(alici);
+  const kisi = aliciDogrula(alici, config);
   const iyzipay = new Iyzipay({ apiKey: config.apiKey, secretKey: config.secretKey, uri: config.uri });
   const istek = {
     locale: Iyzipay.LOCALE.TR,

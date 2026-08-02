@@ -116,6 +116,13 @@ export async function tablolariHazirla() {
   // Şifremi unuttum akışı: şifre değişince o ana kadar üretilmiş JWT'ler
   // tokenDogrula içinde bu tarihle karşılaştırılıp geçersiz sayılır.
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS sifre_degisim_tarihi TIMESTAMPTZ");
+  // İsteğe bağlı TOTP tabanlı iki adımlı doğrulama. TOTP sırları uygulama
+  // katmanında AES-GCM ile şifrelenmiş olarak saklanır; kurtarma kodları hash'tir.
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS iki_faktor_aktif BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS iki_faktor_sir TEXT");
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS iki_faktor_bekleyen_sir TEXT");
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS iki_faktor_kurtarma JSONB NOT NULL DEFAULT '[]'::jsonb");
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS iki_faktor_degisim_tarihi TIMESTAMPTZ");
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sifre_sifirlama (
       id SERIAL PRIMARY KEY,
@@ -921,10 +928,86 @@ export async function kullaniciBulEmail(email) {
 // ID ile kullanici bul (token dogrulamasi sonrasi; sifre_hash HARIC).
 export async function kullaniciBulId(id) {
   const sonuc = await pool.query(
-    "SELECT id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu,burger_damga,sifre_degisim_tarihi FROM kullanicilar WHERE id=$1",
+    "SELECT id,ad,soyad,cinsiyet,email,telefon,rol,puan,davet_kodu,burger_damga,sifre_degisim_tarihi,iki_faktor_aktif FROM kullanicilar WHERE id=$1",
     [id]
   );
   return sonuc.rows[0] ? kullaniciDonustur(sonuc.rows[0]) : null;
+}
+
+export async function ikiFaktorKaydiniGetir(kullaniciId) {
+  const sonuc = await pool.query(
+    `SELECT id,email,sifre_hash,iki_faktor_aktif,iki_faktor_sir,
+            iki_faktor_bekleyen_sir,iki_faktor_kurtarma
+     FROM kullanicilar WHERE id=$1`,
+    [kullaniciId]
+  );
+  return sonuc.rows[0] || null;
+}
+
+export async function ikiFaktorBekleyeniKaydet(kullaniciId, sifreliSir) {
+  await pool.query(
+    `UPDATE kullanicilar
+     SET iki_faktor_bekleyen_sir=$1, iki_faktor_degisim_tarihi=NOW()
+     WHERE id=$2`,
+    [sifreliSir, kullaniciId]
+  );
+}
+
+export async function ikiFaktorEtkinlestir(kullaniciId, kurtarmaHashleri) {
+  const sonuc = await pool.query(
+    `UPDATE kullanicilar
+     SET iki_faktor_aktif=true,
+         iki_faktor_sir=iki_faktor_bekleyen_sir,
+         iki_faktor_bekleyen_sir=NULL,
+         iki_faktor_kurtarma=$1::jsonb,
+         iki_faktor_degisim_tarihi=NOW()
+     WHERE id=$2 AND iki_faktor_bekleyen_sir IS NOT NULL
+     RETURNING id`,
+    [JSON.stringify(kurtarmaHashleri), kullaniciId]
+  );
+  return sonuc.rowCount === 1;
+}
+
+export async function ikiFaktorKapat(kullaniciId) {
+  await pool.query(
+    `UPDATE kullanicilar
+     SET iki_faktor_aktif=false, iki_faktor_sir=NULL,
+         iki_faktor_bekleyen_sir=NULL, iki_faktor_kurtarma='[]'::jsonb,
+         iki_faktor_degisim_tarihi=NOW()
+     WHERE id=$1`,
+    [kullaniciId]
+  );
+}
+
+export async function ikiFaktorKurtarmaKoduKullan(kullaniciId, kodHash) {
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const sonuc = await baglanti.query(
+      "SELECT iki_faktor_kurtarma FROM kullanicilar WHERE id=$1 FOR UPDATE",
+      [kullaniciId]
+    );
+    const kodlar = Array.isArray(sonuc.rows[0]?.iki_faktor_kurtarma)
+      ? sonuc.rows[0].iki_faktor_kurtarma
+      : [];
+    const index = kodlar.indexOf(kodHash);
+    if (index < 0) {
+      await baglanti.query("ROLLBACK");
+      return false;
+    }
+    kodlar.splice(index, 1);
+    await baglanti.query(
+      "UPDATE kullanicilar SET iki_faktor_kurtarma=$1::jsonb WHERE id=$2",
+      [JSON.stringify(kodlar), kullaniciId]
+    );
+    await baglanti.query("COMMIT");
+    return true;
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
 }
 
 // Şifremi unuttum: yeni sıfırlama talebi kaydeder, kullanıcının önceki
@@ -1065,6 +1148,7 @@ function kullaniciDonustur(kullanici) {
     burgerDamga: Number(kullanici.burger_damga || 0),
     davetKodu: kullanici.davet_kodu,
     sifreDegisimTarihi: kullanici.sifre_degisim_tarihi,
+    ikiFaktorAktif: kullanici.iki_faktor_aktif === true,
   };
 }
 

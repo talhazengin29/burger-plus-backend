@@ -14,8 +14,18 @@ import {
   sifreSifirlamaTalebiOlustur,
   sifreSifirlamaTokeniGecerliMi,
   sifreyiSifirla as sifreyiSifirlaDb,
+  ikiFaktorKaydiniGetir,
+  ikiFaktorBekleyeniKaydet,
+  ikiFaktorEtkinlestir,
+  ikiFaktorKapat,
+  ikiFaktorKurtarmaKoduKullan,
 } from "./db.js";
 import { sifirlamaEpostasiGonder } from "./eposta.js";
+import {
+  ikiFaktorSirriUret, ikiFaktorUriUret, ikiFaktorKoduGecerliMi,
+  ikiFaktorSirriSifrele, ikiFaktorSirriCoz,
+  kurtarmaKodlariUret, kurtarmaKoduHashle, kurtarmaKoduBicimindeMi,
+} from "./ikiFaktor.js";
 
 // JWT gizli anahtari. Gercek uretimde .env'den gelmeli ve gizli olmali.
 const URETIM = process.env.NODE_ENV === "production";
@@ -103,9 +113,79 @@ export async function girisYap({ email, sifre } = {}) {
     return { hata: "E-posta veya şifre hatalı." };
   }
 
+  if (kullanici.iki_faktor_aktif) {
+    const ikiFaktorToken = jwt.sign(
+      { id: kullanici.id, amac: "iki-faktor-giris" },
+      JWT_SECRET,
+      { expiresIn: "5m" }
+    );
+    return { ikiFaktorGerekli: true, ikiFaktorToken };
+  }
+
   const guvenli = await kullaniciBulId(kullanici.id);
   const token = tokenUret(kullanici.id);
   return { kullanici: guvenli, token };
+}
+
+async function ikinciFaktoruDogrula(kullaniciId, kayit, kod) {
+  if (!kayit?.iki_faktor_aktif || !kayit.iki_faktor_sir) return false;
+  if (kurtarmaKoduBicimindeMi(kod)) {
+    return ikiFaktorKurtarmaKoduKullan(kullaniciId, kurtarmaKoduHashle(kod));
+  }
+  return ikiFaktorKoduGecerliMi(ikiFaktorSirriCoz(kayit.iki_faktor_sir), kod);
+}
+
+export async function ikiFaktorGirisiniTamamla(ikiFaktorToken, kod) {
+  let cozulmus;
+  try {
+    cozulmus = jwt.verify(String(ikiFaktorToken || ""), JWT_SECRET);
+  } catch {
+    return { hata: "İki adımlı doğrulama oturumunun süresi doldu. Yeniden giriş yapın." };
+  }
+  if (cozulmus.amac !== "iki-faktor-giris" || !cozulmus.id) {
+    return { hata: "İki adımlı doğrulama oturumu geçersiz." };
+  }
+  const kayit = await ikiFaktorKaydiniGetir(cozulmus.id);
+  if (!await ikinciFaktoruDogrula(cozulmus.id, kayit, kod)) {
+    return { hata: "Doğrulama kodu veya kurtarma kodu geçersiz." };
+  }
+  const kullanici = await kullaniciBulId(cozulmus.id);
+  return { kullanici, token: tokenUret(cozulmus.id) };
+}
+
+export async function ikiFaktorKurulumBaslat(kullaniciId, mevcutSifre) {
+  const kayit = await ikiFaktorKaydiniGetir(kullaniciId);
+  if (!kayit || !await bcrypt.compare(String(mevcutSifre || ""), kayit.sifre_hash)) {
+    return { hata: "Mevcut şifreniz hatalı." };
+  }
+  if (kayit.iki_faktor_aktif) return { hata: "İki adımlı doğrulama zaten aktif." };
+  const secret = ikiFaktorSirriUret();
+  await ikiFaktorBekleyeniKaydet(kullaniciId, ikiFaktorSirriSifrele(secret));
+  return { secret, otpauthUri: ikiFaktorUriUret(secret, kayit.email) };
+}
+
+export async function ikiFaktorKurulumOnayla(kullaniciId, kod) {
+  const kayit = await ikiFaktorKaydiniGetir(kullaniciId);
+  if (!kayit?.iki_faktor_bekleyen_sir) return { hata: "Önce iki adımlı doğrulama kurulumunu başlatın." };
+  const secret = ikiFaktorSirriCoz(kayit.iki_faktor_bekleyen_sir);
+  if (!await ikiFaktorKoduGecerliMi(secret, kod)) return { hata: "Authenticator kodu geçersiz." };
+  const kurtarmaKodlari = kurtarmaKodlariUret();
+  const etkinlesti = await ikiFaktorEtkinlestir(kullaniciId, kurtarmaKodlari.map(kurtarmaKoduHashle));
+  if (!etkinlesti) return { hata: "İki adımlı doğrulama etkinleştirilemedi." };
+  return { basarili: true, kurtarmaKodlari };
+}
+
+export async function ikiFaktorDevreDisiBirak(kullaniciId, mevcutSifre, kod) {
+  const kayit = await ikiFaktorKaydiniGetir(kullaniciId);
+  if (!kayit?.iki_faktor_aktif) return { hata: "İki adımlı doğrulama zaten kapalı." };
+  if (!await bcrypt.compare(String(mevcutSifre || ""), kayit.sifre_hash)) {
+    return { hata: "Mevcut şifreniz hatalı." };
+  }
+  if (!await ikinciFaktoruDogrula(kullaniciId, kayit, kod)) {
+    return { hata: "Doğrulama kodu veya kurtarma kodu geçersiz." };
+  }
+  await ikiFaktorKapat(kullaniciId);
+  return { basarili: true };
 }
 
 // --- Token uret / dogrula ---
