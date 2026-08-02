@@ -130,8 +130,27 @@ export async function iyzicoSonucuGetir(odeme, token) {
     conversationId: odeme.siparisNo,
     token,
   });
-  if (sonuc.paymentStatus !== "SUCCESS" || Number(sonuc.paidPrice) !== Number(odeme.tutar)) {
-    throw new Error("İyzico ödeme sonucu doğrulanamadı.");
+  const siparisTutari = Number(odeme.tutar);
+  const sepetTutari = Number(sonuc.price);
+  const tahsilEdilenTutar = Number(sonuc.paidPrice);
+  const ayniPara = (sol, sag) => Number.isFinite(sol) && Number.isFinite(sag) && Math.abs(sol - sag) < 0.01;
+
+  if (sonuc.paymentStatus !== "SUCCESS") {
+    throw new Error(`İyzico ödeme sonucu başarısız: ${sonuc.paymentStatus || "BİLİNMİYOR"}.`);
+  }
+  // paidPrice taksit/komisyon maliyetini içerebilir. Sipariş tutarını İyzico'nun
+  // price alanıyla doğrularız; karttan çekilen tutar sipariş tutarından az olamaz.
+  if (!ayniPara(sepetTutari, siparisTutari) || !Number.isFinite(tahsilEdilenTutar) || tahsilEdilenTutar + 0.01 < siparisTutari) {
+    throw new Error("İyzico ödeme tutarı siparişle eşleşmiyor.");
+  }
+  if (sonuc.conversationId && sonuc.conversationId !== odeme.siparisNo) {
+    throw new Error("İyzico ödeme eşleştirme bilgisi geçersiz.");
+  }
+  if (sonuc.currency && sonuc.currency !== "TRY") {
+    throw new Error("İyzico ödeme para birimi geçersiz.");
+  }
+  if (sonuc.fraudStatus != null && Number(sonuc.fraudStatus) !== 1) {
+    throw new Error("İyzico ödeme güvenlik incelemesinde onaylanmadı.");
   }
   return sonuc;
 }

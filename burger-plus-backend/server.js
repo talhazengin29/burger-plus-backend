@@ -399,7 +399,17 @@ app.post("/api/odeme/iyzico/callback", async (req, res) => {
     odeme.slug = callbackIsletmesi.slug;
     await iyzicoSonucuGetir(odeme, token);
     const sonuc = await odemeIyzicoOlarakOnayla(odeme.isletmeId, odeme.id, token);
-    await onaylananOdemeyiMutfagaAktar(sonuc.odeme);
+    // Tahsilat doğrulanıp yerel ödeme başarılı işaretlendikten sonra operasyonel
+    // aktarım hatası müşteriye "ödeme başarısız" olarak gösterilmemeli.
+    try {
+      await onaylananOdemeyiMutfagaAktar(sonuc.odeme);
+    } catch (aktarimHatasi) {
+      console.error("Ödeme başarılı, mutfak aktarımı tamamlanamadı:", {
+        odemeId: sonuc.odeme.id,
+        isletmeId: sonuc.odeme.isletmeId,
+        mesaj: aktarimHatasi.message,
+      });
+    }
     res.redirect(303, iyzicoDonusAdresi(odeme.slug, odeme.id));
   } catch (e) {
     console.error("İyzico callback:", e.message);
