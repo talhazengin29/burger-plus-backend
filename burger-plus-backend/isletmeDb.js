@@ -244,7 +244,7 @@ export async function isletmeleriGetir() {
   return sonuc.rows.map(isletmeDonustur);
 }
 
-export async function isletmeOlustur(veri = {}) {
+export async function isletmeOlustur(veri = {}, transactionHazirligi = null) {
   const slug = String(veri.slug || "").trim().toLowerCase();
   const ad = String(veri.ad || "").trim().slice(0, 160);
   const konsept = String(veri.konsept || "burger").trim().toLowerCase().slice(0, 60) || "burger";
@@ -268,6 +268,10 @@ export async function isletmeOlustur(veri = {}) {
          VALUES ($1,$2,$3,true) ON CONFLICT (isletme_id,ad) DO NOTHING`,
         [isletme.id, kategori, (sira + 1) * 10]
       );
+    }
+    if (transactionHazirligi != null) {
+      if (typeof transactionHazirligi !== "function") throw new Error("İşletme transaction hazırlığı geçersiz.");
+      await transactionHazirligi(baglanti, isletme);
     }
     await baglanti.query("COMMIT");
     return isletme;

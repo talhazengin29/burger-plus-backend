@@ -26,6 +26,10 @@ import {
   ikiFaktorSirriSifrele, ikiFaktorSirriCoz,
   kurtarmaKodlariUret, kurtarmaKoduHashle, kurtarmaKoduBicimindeMi,
 } from "./ikiFaktor.js";
+import {
+  superAdminEmailIleGetir, superAdminIdIleGetir, superAdminIkiFaktorSirriKaydet,
+  superAdminGirisiniKaydet, superAdminDonustur,
+} from "./superAdminDb.js";
 
 // JWT gizli anahtari. Gercek uretimde .env'den gelmeli ve gizli olmali.
 const URETIM = process.env.NODE_ENV === "production";
@@ -38,6 +42,8 @@ if (!URETIM && !process.env.JWT_SECRET) {
   console.warn("UYARI: Yerel JWT_SECRET kullaniliyor; canli ortamda guclu bir JWT_SECRET tanimlayin.");
 }
 const TOKEN_SURESI = "7d"; // token 7 gun gecerli
+const SUPER_ADMIN_TOKEN_SURESI = "4h";
+const GECERSIZ_SUPER_ADMIN_HASH = "$2b$12$7nAOjall2JqSd9pzkW56TuM2l80iSQxxj1E.blcyle8ZFkGtHhwVm";
 
 function isletmeIdZorunlu(isletmeId) {
   const id = Number(isletmeId);
@@ -214,13 +220,15 @@ export async function ikiFaktorDevreDisiBirak(isletmeId, kullaniciId, mevcutSifr
 // --- Token uret / dogrula ---
 function tokenUret(kullaniciId, isletmeId) {
   const tenantId = isletmeIdZorunlu(isletmeId);
-  return jwt.sign({ id: kullaniciId, isletmeId: tenantId }, JWT_SECRET, { expiresIn: TOKEN_SURESI });
+  return jwt.sign({ id: kullaniciId, isletmeId: tenantId, tip: "kullanici" }, JWT_SECRET, { expiresIn: TOKEN_SURESI });
 }
 
 // Token'i dogrular, gecerliyse guncel kullanici bilgisini dondurur.
 export async function tokenDogrula(token, beklenenIsletmeId = null) {
   try {
     const cozulmus = jwt.verify(token, JWT_SECRET);
+    if (cozulmus.tip && cozulmus.tip !== "kullanici") return null;
+    if (!cozulmus.id) return null;
     const tenantId = isletmeIdZorunlu(cozulmus.isletmeId);
     if (beklenenIsletmeId != null && tenantId !== isletmeIdZorunlu(beklenenIsletmeId)) return null;
     const kullanici = await kullaniciBulId(tenantId, cozulmus.id);
@@ -244,7 +252,12 @@ function istekTokeniniCoz(token) {
 }
 
 function tokenIsletmesiUyusuyorMu(cozulmus, req) {
-  return Number(cozulmus?.isletmeId) === Number(req.isletme?.id);
+  return (!cozulmus?.tip || cozulmus.tip === "kullanici")
+    && Number(cozulmus?.isletmeId) === Number(req.isletme?.id);
+}
+
+function normalTokenTipiMi(cozulmus) {
+  return !cozulmus?.tip || cozulmus.tip === "kullanici";
 }
 
 // Express middleware: gecerli token olmadan gecmeyi engeller.
@@ -255,6 +268,9 @@ export function korumaliMiddleware() {
     if (!token) return res.status(401).json({ hata: "Giriş gerekli." });
 
     const cozulmus = istekTokeniniCoz(token);
+    if (cozulmus && !normalTokenTipiMi(cozulmus)) {
+      return res.status(403).json({ hata: "Bu token normal kullanıcı servislerinde kullanılamaz." });
+    }
     if (cozulmus && !tokenIsletmesiUyusuyorMu(cozulmus, req)) {
       return res.status(403).json({ hata: "Bu oturum başka bir işletmeye ait." });
     }
@@ -274,6 +290,9 @@ export function opsiyonelKullaniciMiddleware() {
     const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
     if (token) {
       const cozulmus = istekTokeniniCoz(token);
+      if (cozulmus && !normalTokenTipiMi(cozulmus)) {
+        return res.status(403).json({ hata: "Bu token normal kullanıcı servislerinde kullanılamaz." });
+      }
       if (cozulmus && !tokenIsletmesiUyusuyorMu(cozulmus, req)) {
         return res.status(403).json({ hata: "Bu oturum başka bir işletmeye ait." });
       }
@@ -291,6 +310,18 @@ export function adminMiddleware() {
     if (!token) return res.status(401).json({ hata: "Yönetici girişi gerekli." });
 
     const cozulmus = istekTokeniniCoz(token);
+    if (cozulmus?.tip === "impersonation") {
+      const erisim = await impersonationTokeniniDogrula(token, req.isletme?.id);
+      if (!erisim) return res.status(403).json({ hata: "Super admin erişim token'ı geçersiz veya süresi dolmuş." });
+      req.kullanici = { id: null, ad: erisim.superAdmin.ad, soyad: "", email: erisim.superAdmin.email, rol: "admin" };
+      req.superAdmin = erisim.superAdmin;
+      req.impersonatedBy = erisim.superAdmin.id;
+      req.impersonation = { aktif: true, superAdminId: erisim.superAdmin.id, isletmeId: erisim.isletmeId, isletmeSlug: erisim.isletmeSlug };
+      return next();
+    }
+    if (cozulmus && !normalTokenTipiMi(cozulmus)) {
+      return res.status(403).json({ hata: "Bu token işletme yöneticisi servislerinde kullanılamaz." });
+    }
     if (cozulmus && !tokenIsletmesiUyusuyorMu(cozulmus, req)) {
       return res.status(403).json({ hata: "Bu oturum başka bir işletmeye ait." });
     }
@@ -311,6 +342,9 @@ export function rolMiddleware(izinliRoller = []) {
     const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
     if (!token) return res.status(401).json({ hata: "Giris gerekli." });
     const cozulmus = istekTokeniniCoz(token);
+    if (cozulmus && !normalTokenTipiMi(cozulmus)) {
+      return res.status(403).json({ hata: "Bu token personel servislerinde kullanılamaz." });
+    }
     if (cozulmus && !tokenIsletmesiUyusuyorMu(cozulmus, req)) {
       return res.status(403).json({ hata: "Bu oturum başka bir işletmeye ait." });
     }
@@ -322,6 +356,96 @@ export function rolMiddleware(izinliRoller = []) {
     req.kullanici = kullanici;
     next();
   };
+}
+
+// --- Platform super admin kimliği ---
+export async function superAdminGiris(email, sifre) {
+  const temizEmail = String(email || "").trim().toLowerCase().slice(0, 254);
+  const kayit = await superAdminEmailIleGetir(temizEmail);
+  const sifreDogru = await bcrypt.compare(String(sifre || ""), kayit?.sifre_hash || GECERSIZ_SUPER_ADMIN_HASH);
+  if (!kayit?.aktif || !sifreDogru) {
+    return { hata: "E-posta veya şifre hatalı." };
+  }
+
+  let secret = null;
+  let kurulumGerekli = kayit.iki_faktor_aktif !== true;
+  if (!kayit.iki_faktor_sirri) {
+    secret = ikiFaktorSirriUret();
+    await superAdminIkiFaktorSirriKaydet(kayit.id, ikiFaktorSirriSifrele(secret));
+  } else if (kurulumGerekli) {
+    secret = ikiFaktorSirriCoz(kayit.iki_faktor_sirri);
+  }
+  if (!secret && !kayit.iki_faktor_aktif) return { hata: "İki faktör kurulumu tamamlanamadı." };
+
+  const ikiFaktorToken = jwt.sign(
+    { superAdminId: kayit.id, tip: "super-admin-2fa", amac: "super-admin-iki-faktor" },
+    JWT_SECRET,
+    { expiresIn: "5m" }
+  );
+  return {
+    ikiFaktorGerekli: true,
+    ikiFaktorKurulumGerekli: kurulumGerekli,
+    ikiFaktorToken,
+    ...(kurulumGerekli ? { secret, otpauthUri: ikiFaktorUriUret(secret, kayit.email) } : {}),
+  };
+}
+
+export async function superAdminIkiFaktorGirisiniTamamla(ikiFaktorToken, kod) {
+  let cozulmus;
+  try {
+    cozulmus = jwt.verify(String(ikiFaktorToken || ""), JWT_SECRET);
+  } catch {
+    return { hata: "İki faktör oturumunun süresi doldu. Yeniden giriş yapın." };
+  }
+  if (cozulmus.tip !== "super-admin-2fa" || cozulmus.amac !== "super-admin-iki-faktor" || !cozulmus.superAdminId) {
+    return { hata: "İki faktör oturumu geçersiz." };
+  }
+  const kayit = await superAdminIdIleGetir(cozulmus.superAdminId);
+  if (!kayit?.aktif || !kayit.iki_faktor_sirri) return { hata: "Super admin hesabı kullanılamıyor." };
+  let gecerli = false;
+  try {
+    gecerli = await ikiFaktorKoduGecerliMi(ikiFaktorSirriCoz(kayit.iki_faktor_sirri), kod);
+  } catch {
+    return { hata: "İki faktör anahtarı okunamadı." };
+  }
+  if (!gecerli) return { hata: "Doğrulama kodu geçersiz." };
+  const superAdmin = await superAdminGirisiniKaydet(kayit.id, kayit.iki_faktor_aktif !== true);
+  const token = jwt.sign({ superAdminId: kayit.id, tip: "super-admin" }, JWT_SECRET, { expiresIn: SUPER_ADMIN_TOKEN_SURESI });
+  return { superAdmin, token };
+}
+
+export function superAdminMiddleware() {
+  return async (req, res, next) => {
+    const baslik = req.headers.authorization || "";
+    const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
+    if (!token) return res.status(401).json({ hata: "Super admin girişi gerekli." });
+    const cozulmus = istekTokeniniCoz(token);
+    if (!cozulmus) return res.status(401).json({ hata: "Super admin oturumu geçersiz veya süresi dolmuş." });
+    if (cozulmus.tip !== "super-admin" || !cozulmus.superAdminId) {
+      return res.status(403).json({ hata: "Bu token super admin servislerinde kullanılamaz." });
+    }
+    const kayit = await superAdminIdIleGetir(cozulmus.superAdminId);
+    if (!kayit?.aktif || !kayit.iki_faktor_aktif) return res.status(403).json({ hata: "Super admin hesabı aktif değil." });
+    req.superAdmin = superAdminDonustur(kayit);
+    next();
+  };
+}
+
+export function superAdminErisimTokeniUret(superAdminId, isletme) {
+  const tenantId = isletmeIdZorunlu(isletme?.id);
+  return jwt.sign({
+    tip: "impersonation", isletmeId: tenantId, isletmeSlug: isletme.slug,
+    impersonatedBy: Number(superAdminId), rol: "admin",
+  }, JWT_SECRET, { expiresIn: "30m" });
+}
+
+export async function impersonationTokeniniDogrula(token, beklenenIsletmeId = null) {
+  const cozulmus = istekTokeniniCoz(String(token || ""));
+  if (!cozulmus || cozulmus.tip !== "impersonation" || !cozulmus.impersonatedBy || !cozulmus.isletmeId) return null;
+  if (beklenenIsletmeId != null && Number(cozulmus.isletmeId) !== Number(beklenenIsletmeId)) return null;
+  const kayit = await superAdminIdIleGetir(cozulmus.impersonatedBy);
+  if (!kayit?.aktif || !kayit.iki_faktor_aktif) return null;
+  return { superAdmin: superAdminDonustur(kayit), isletmeId: Number(cozulmus.isletmeId), isletmeSlug: cozulmus.isletmeSlug };
 }
 
 // --- Sifremi unuttum ---

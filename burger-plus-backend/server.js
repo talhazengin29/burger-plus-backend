@@ -73,6 +73,8 @@ import {
   sifirlamaTalepEt, sifirlamaTokenGecerliMi, sifreyiSifirla,
   ikiFaktorGirisiniTamamla, ikiFaktorKurulumBaslat,
   ikiFaktorKurulumOnayla, ikiFaktorDevreDisiBirak,
+  superAdminGiris, superAdminIkiFaktorGirisiniTamamla, superAdminMiddleware,
+  superAdminErisimTokeniUret, impersonationTokeniniDogrula,
 } from "./auth.js";
 import {
   sadakatTablolariHazirla, sadakatOzetiniGetir, puanlaOdulSatinAl,
@@ -80,8 +82,16 @@ import {
 } from "./sadakatDb.js";
 import {
   isletmeTablosunuHazirla, isletmeMigrationunuCalistir, isletmeSlugIleGetir, isletmeIdIleGetir,
-  isletmeTemasiniGuncelle, isletmeLogosunuGuncelle,
+  isletmeOlustur, isletmeTemasiniGuncelle, isletmeLogosunuGuncelle,
 } from "./isletmeDb.js";
+import {
+  superAdminTablolariniHazirla, ilkSuperAdminiHazirla,
+  superAdminKaydiEkle, superAdminKayitlariniGetir, superIsletmeleriGetir,
+  superIsletmeDetayiGetir, superIsletmeBilgileriniGuncelle, superIsletmeDurumunuGuncelle,
+  superIsletmeSilmeOzeti, superIsletmeyiYumusakSil, platformOzetiniGetir,
+  ciroRaporunuGetir, buyumeRaporunuGetir, siparisRaporunuGetir, kullaniciRaporunuGetir,
+  abonelikleriGetir, abonelikOlustur, abonelikGuncelle, gelirRaporunuGetir,
+} from "./superAdminDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -106,7 +116,7 @@ const izinliOriginler = new Set(
     .filter(Boolean)
 );
 if (!URETIM) {
-  ["http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173", "http://127.0.0.1:5174"]
+  ["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://127.0.0.1:5173", "http://127.0.0.1:5174", "http://127.0.0.1:5175"]
     .forEach((origin) => izinliOriginler.add(origin));
 }
 function originIzinli(origin) {
@@ -159,6 +169,10 @@ const ikiFaktorLimiti = rateLimit({
   windowMs: 10 * 60_000, limit: 15, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla iki adımlı doğrulama denemesi yapıldı. Lütfen daha sonra tekrar deneyin." },
 });
+const superAdminGirisLimiti = rateLimit({
+  windowMs: 15 * 60_000, limit: 5, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla super admin giriş denemesi yapıldı. 15 dakika sonra tekrar deneyin." },
+});
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -186,19 +200,30 @@ function temaliIsletmeYaniti(isletme) {
 
 app.get("/api/isletme/:slug", async (req, res) => {
   const isletme = await isletmeSlugIleGetir(req.params.slug);
-  if (!isletme?.aktif) return res.status(404).json({ hata: "İşletme bulunamadı." });
+  if (!isletme) return res.status(404).json({ hata: "İşletme bulunamadı." });
+  if (!isletme.aktif) {
+    const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    const erisim = token ? await impersonationTokeniniDogrula(token, isletme.id) : null;
+    if (!erisim) return res.status(404).json({ hata: "İşletme bulunamadı." });
+  }
   res.json(temaliIsletmeYaniti(isletme));
 });
 
 async function isletmeMiddleware(req, res, next) {
   try {
+    if (req.path === "/super" || req.path.startsWith("/super/")) return next();
     const callbackMu = req.method === "POST" && req.path === "/odeme/iyzico/callback";
     const eskiDonusMu = req.method === "GET" && /^\/odeme\/iyzico\/[^/]+\/odeme-basarili$/.test(req.path);
     if (callbackMu || eskiDonusMu) return next();
     const slug = req.headers["x-isletme"] || req.query.isletme;
     if (!slug) return res.status(400).json({ hata: "İşletme belirtilmedi." });
     const isletme = await isletmeSlugIleGetir(slug);
-    if (!isletme?.aktif) return res.status(404).json({ hata: "İşletme bulunamadı." });
+    if (!isletme) return res.status(404).json({ hata: "İşletme bulunamadı." });
+    if (!isletme.aktif) {
+      const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+      const erisim = token ? await impersonationTokeniniDogrula(token, isletme.id) : null;
+      if (!erisim) return res.status(404).json({ hata: "İşletme bulunamadı." });
+    }
     req.isletme = isletme;
     next();
   } catch (hata) {
@@ -505,7 +530,165 @@ const guvenli = (islem) => async (req, res) => {
   }
 };
 
+const superAdmin = superAdminMiddleware();
+const MUTASYON_METOTLARI = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+function denetimIcinTemizle(deger, derinlik = 0) {
+  if (derinlik > 4 || deger == null) return deger;
+  if (Array.isArray(deger)) return deger.slice(0, 30).map((oge) => denetimIcinTemizle(oge, derinlik + 1));
+  if (typeof deger !== "object") return typeof deger === "string" ? deger.slice(0, 500) : deger;
+  return Object.fromEntries(Object.entries(deger).slice(0, 50).map(([anahtar, icerik]) => [
+    anahtar,
+    /(sifre|token|secret|sirri|kod)/i.test(anahtar) ? "[GİZLİ]" : denetimIcinTemizle(icerik, derinlik + 1),
+  ]));
+}
+
+function superAdminDenetimMiddleware(req, res, next) {
+  if (!MUTASYON_METOTLARI.has(req.method)) return next();
+  res.on("finish", () => {
+    if (!req.superAdmin?.id) return;
+    superAdminKaydiEkle(req.superAdmin.id, {
+      islem: res.locals.denetimIslemi || `${req.method} ${req.originalUrl.split("?")[0]}`,
+      hedefIsletmeId: res.locals.hedefIsletmeId || null,
+      detay: { durum: res.statusCode, girdi: denetimIcinTemizle(req.body || {}), ...(res.locals.denetimDetay || {}) },
+      ip: req.ip || req.socket.remoteAddress || "",
+    }).catch((hata) => console.error("Super admin denetim kaydı yazılamadı:", hata.message));
+  });
+  next();
+}
+
+// Super admin uçları tenant bağlamından bağımsızdır. Kimlik uçları hariç tümü
+// yalnızca tip='super-admin' olan kısa ömürlü token ile açılır.
+app.use("/api/super", superAdminDenetimMiddleware);
+
+app.post("/api/super/giris", superAdminGirisLimiti, guvenli(async (req, res) => {
+  const sonuc = await superAdminGiris(req.body?.email, req.body?.sifre);
+  if (sonuc.hata) return res.status(401).json(sonuc);
+  return sonuc;
+}));
+
+app.post("/api/super/giris/iki-faktor", superAdminGirisLimiti, guvenli(async (req, res) => {
+  const sonuc = await superAdminIkiFaktorGirisiniTamamla(req.body?.ikiFaktorToken, req.body?.kod);
+  if (sonuc.hata) return res.status(401).json(sonuc);
+  req.superAdmin = sonuc.superAdmin;
+  res.locals.denetimIslemi = "super-admin-giris";
+  return sonuc;
+}));
+
+app.get("/api/super/ben", superAdmin, (req, res) => res.json({ superAdmin: req.superAdmin }));
+app.post("/api/super/cikis", superAdmin, (req, res) => {
+  res.locals.denetimIslemi = "super-admin-cikis";
+  res.json({ basarili: true });
+});
+
+app.get("/api/super/isletmeler", superAdmin, guvenli(async () => ({ isletmeler: await superIsletmeleriGetir() })));
+app.get("/api/super/isletmeler/:id", superAdmin, guvenli(async (req) => {
+  const isletme = await superIsletmeDetayiGetir(req.params.id);
+  if (!isletme) throw new Error("İşletme bulunamadı.");
+  return { isletme, tema: temaCoz(isletme) };
+}));
+app.post("/api/super/isletmeler", superAdmin, guvenli(async (req, res) => {
+  let isletme;
+  const olusan = await isletmeOlustur({
+    slug: req.body?.slug, ad: req.body?.ad, konsept: req.body?.konsept,
+    aktif: req.body?.aktif !== false, tema: {},
+  }, async (baglanti, temelIsletme) => {
+    isletme = await superIsletmeBilgileriniGuncelle(temelIsletme.id, req.body || {}, baglanti);
+    await abonelikOlustur({
+      isletmeId: temelIsletme.id, plan: req.body?.plan || "baslangic", aylikUcret: req.body?.aylikUcret || 0,
+      durum: req.body?.abonelikDurumu || "deneme", baslangicTarihi: new Date().toISOString().slice(0, 10),
+      bitisTarihi: req.body?.bitisTarihi || null, notlar: req.body?.abonelikNotlari || "",
+    }, baglanti);
+  });
+  res.locals.hedefIsletmeId = olusan.id;
+  res.locals.denetimIslemi = "isletme-olusturma";
+  res.locals.denetimDetay = { slug: olusan.slug };
+  return { isletme: await superIsletmeDetayiGetir(olusan.id), tema: temaCoz(isletme) };
+}));
+app.put("/api/super/isletmeler/:id", superAdmin, guvenli(async (req, res) => {
+  const isletme = await superIsletmeBilgileriniGuncelle(req.params.id, req.body || {});
+  res.locals.hedefIsletmeId = isletme.id;
+  res.locals.denetimIslemi = "isletme-guncelleme";
+  return { isletme, tema: temaCoz(isletme) };
+}));
+app.patch("/api/super/isletmeler/:id/durum", superAdmin, guvenli(async (req, res) => {
+  if (typeof req.body?.aktif !== "boolean") throw new Error("aktif alanı boolean olmalıdır.");
+  const isletme = await superIsletmeDurumunuGuncelle(req.params.id, req.body.aktif);
+  res.locals.hedefIsletmeId = isletme.id;
+  res.locals.denetimIslemi = req.body.aktif ? "isletme-aktiflestirme" : "isletme-askiya-alma";
+  return { isletme };
+}));
+app.delete("/api/super/isletmeler/:id", superAdmin, async (req, res) => {
+  try {
+    const ozet = await superIsletmeSilmeOzeti(req.params.id);
+    res.locals.hedefIsletmeId = ozet.id;
+    res.locals.denetimIslemi = "isletme-silme-denemesi";
+    if (!req.body?.onaySlug || req.body.onaySlug !== ozet.slug) {
+      return res.status(400).json({ hata: "Silme onayı için işletme slug'ını birebir yazın.", onayGerekli: true, silmeOzeti: ozet });
+    }
+    const silme = await superIsletmeyiYumusakSil(req.params.id);
+    res.locals.denetimIslemi = "isletme-yumusak-silme";
+    res.locals.denetimDetay = { slug: ozet.slug, silmeOzeti: ozet, kaliciSilinmeTarihi: silme.kaliciSilinmeTarihi };
+    res.json({ basarili: true, silmeOzeti: ozet, ...silme });
+  } catch (hata) {
+    res.status(400).json({ hata: hata.message });
+  }
+});
+
+app.get("/api/super/ozet", superAdmin, guvenli(() => platformOzetiniGetir()));
+app.get("/api/super/rapor/ciro", superAdmin, guvenli((req) => ciroRaporunuGetir(req.query.gun, req.query.baslangic, req.query.bitis)));
+app.get("/api/super/rapor/buyume", superAdmin, guvenli((req) => buyumeRaporunuGetir(req.query.ay)));
+app.get("/api/super/rapor/siparis", superAdmin, guvenli((req) => siparisRaporunuGetir(req.query.gun, req.query.baslangic, req.query.bitis)));
+app.get("/api/super/rapor/kullanici", superAdmin, guvenli((req) => kullaniciRaporunuGetir(req.query.baslangic, req.query.bitis)));
+
+app.get("/api/super/abonelikler", superAdmin, guvenli(async () => ({ abonelikler: await abonelikleriGetir() })));
+app.post("/api/super/abonelikler", superAdmin, guvenli(async (req, res) => {
+  const abonelik = await abonelikOlustur(req.body || {});
+  res.locals.hedefIsletmeId = abonelik.isletmeId;
+  res.locals.denetimIslemi = "abonelik-olusturma";
+  return { abonelik };
+}));
+app.put("/api/super/abonelikler/:id", superAdmin, guvenli(async (req, res) => {
+  const abonelik = await abonelikGuncelle(req.params.id, req.body || {});
+  res.locals.hedefIsletmeId = abonelik.isletmeId;
+  res.locals.denetimIslemi = "abonelik-guncelleme";
+  return { abonelik };
+}));
+app.get("/api/super/gelir", superAdmin, guvenli((req) => gelirRaporunuGetir(req.query.ay)));
+
+app.post("/api/super/isletmeler/:id/erisim-tokeni", superAdmin, guvenli(async (req, res) => {
+  const isletme = await superIsletmeDetayiGetir(req.params.id);
+  if (!isletme || isletme.silinmeTarihi) throw new Error("İşletme bulunamadı veya silinmek üzere işaretli.");
+  const token = superAdminErisimTokeniUret(req.superAdmin.id, isletme);
+  res.locals.hedefIsletmeId = isletme.id;
+  res.locals.denetimIslemi = "isletme-adina-erisim";
+  res.locals.denetimDetay = { slug: isletme.slug, sureDakika: 30 };
+  return { token, sonGecerlilikDakika: 30, isletme: { id: isletme.id, slug: isletme.slug, ad: isletme.ad } };
+}));
+app.get("/api/super/kayitlar", superAdmin, guvenli(async (req) => ({
+  kayitlar: await superAdminKayitlariniGetir({
+    limit: req.query.limit, islem: req.query.islem, isletmeId: req.query.isletmeId,
+    baslangic: req.query.baslangic, bitis: req.query.bitis,
+  }),
+})));
+
+// Impersonation ile yapılan işletme admini mutasyonları da platform denetim
+// günlüğüne yazılır. Middleware yanıt sonunda adminMiddleware'in eklediği kimliği okur.
+app.use("/api/admin", (req, res, next) => {
+  if (!MUTASYON_METOTLARI.has(req.method)) return next();
+  res.on("finish", () => {
+    if (!req.impersonatedBy) return;
+    superAdminKaydiEkle(req.impersonatedBy, {
+      islem: `impersonation ${req.method} ${req.originalUrl.split("?")[0]}`,
+      hedefIsletmeId: req.isletme?.id,
+      detay: { durum: res.statusCode, girdi: denetimIcinTemizle(req.body || {}) },
+      ip: req.ip || req.socket.remoteAddress || "",
+    }).catch((hata) => console.error("Impersonation denetim kaydı yazılamadı:", hata.message));
+  });
+  next();
+});
+
 app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
+app.get("/api/admin/ben", admin, (req, res) => res.json({ kullanici: req.kullanici, impersonation: req.impersonation || null }));
 app.put("/api/admin/tema", admin, guvenli(async (req) => {
   const isletme = await isletmeTemasiniGuncelle(req.isletme.id, req.body || {});
   const yanit = temaliIsletmeYaniti(isletme);
@@ -739,11 +922,16 @@ io.use(async (socket, sonraki) => {
   try {
     const slug = socket.handshake.auth?.isletme || socket.handshake.query?.isletme;
     const isletme = await isletmeSlugIleGetir(slug);
-    if (!isletme?.aktif) return sonraki(new Error("İşletme bulunamadı"));
+    if (!isletme) return sonraki(new Error("İşletme bulunamadı"));
+    const token = String(socket.handshake.auth?.token || "").trim();
+    const impersonation = token ? await impersonationTokeniniDogrula(token, isletme.id) : null;
+    if (!isletme.aktif && !impersonation) return sonraki(new Error("İşletme bulunamadı"));
     socket.data.isletmeId = isletme.id;
     socket.data.isletmeSlug = isletme.slug;
-    const token = String(socket.handshake.auth?.token || "").trim();
-    socket.kullanici = token ? await tokenDogrula(token, isletme.id) : null;
+    socket.kullanici = impersonation
+      ? { id: null, ad: impersonation.superAdmin.ad, email: impersonation.superAdmin.email, rol: "admin" }
+      : token ? await tokenDogrula(token, isletme.id) : null;
+    if (impersonation) socket.data.impersonatedBy = impersonation.superAdmin.id;
     if (token && !socket.kullanici) return sonraki(new Error("Oturum gecersiz."));
     sonraki();
   } catch {
@@ -892,6 +1080,8 @@ isletmeTablosunuHazirla()
   .then(() => adminTablolariHazirla(varsayilanIsletmeId))
   .then(() => sadakatTablolariHazirla(varsayilanIsletmeId, pool))
   .then(() => isletmeMigrationunuCalistir())
+  .then(() => superAdminTablolariniHazirla())
+  .then(() => ilkSuperAdminiHazirla())
   .then(() => {
     httpServer.listen(PORT, "0.0.0.0", () => {
       console.log(`Burger Plus backend calisiyor -> port ${PORT}`);
