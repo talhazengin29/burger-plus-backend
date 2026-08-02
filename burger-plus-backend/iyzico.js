@@ -46,11 +46,17 @@ function ayarlar() {
 }
 
 function aliciDogrula(alici = {}, config) {
+  const telefonRakamlari = String(alici.telefon || "").replace(/\D/g, "");
+  const telefon = /^05\d{9}$/.test(telefonRakamlari)
+    ? `+9${telefonRakamlari}`
+    : /^5\d{9}$/.test(telefonRakamlari)
+      ? `+90${telefonRakamlari}`
+      : /^90\d{10}$/.test(telefonRakamlari) ? `+${telefonRakamlari}` : "";
   const veri = {
     ad: String(alici.ad || "").trim().slice(0, 80),
     soyad: String(alici.soyad || "").trim().slice(0, 80),
     email: String(alici.email || "").trim().toLowerCase().slice(0, 160),
-    telefon: String(alici.telefon || "").replace(/\s/g, "").slice(0, 20),
+    telefon,
     kimlikNo: config.varsayilanKimlikNo,
     adres: config.varsayilanAdres.slice(0, 300),
     il: config.varsayilanIl.slice(0, 80),
@@ -59,7 +65,7 @@ function aliciDogrula(alici = {}, config) {
   if (!veri.ad || !veri.soyad || !/^\S+@\S+\.\S+$/.test(veri.email)) {
     throw new Error("Ödeme için ad, soyad ve e-posta bilgisi gerekli.");
   }
-  if (!/^\+?90\d{10}$/.test(veri.telefon.replace(/^00/, "+"))) throw new Error("Telefon numarasını +905XXXXXXXXX biçiminde gir.");
+  if (!veri.telefon) throw new Error("Telefon numarasını 05XXXXXXXXX veya +905XXXXXXXXX biçiminde gir.");
   return veri;
 }
 

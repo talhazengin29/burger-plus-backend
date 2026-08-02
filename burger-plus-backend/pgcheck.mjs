@@ -1,19 +1,45 @@
 import { io } from "socket.io-client";
-const s = io("http://localhost:4000");
-s.on("connect", () => {
-  s.emit("masaya-katil", "9");
-  setTimeout(() => {
-    s.emit("urun-ekle", { masaNo: "9", urun: { id: 1, ad: "Test", fiyat: 180, adet: 1 }, kisiAdi: "A" });
-    setTimeout(async () => {
-      const r = await fetch("http://localhost:4000/api/masa/9");
-      const d = await r.json();
-      console.log("Kalem sayısı:", d.kalemler.length);
-      if (d.kalemler[0]) {
-        const k = d.kalemler[0];
-        console.log("fiyat degeri:", JSON.stringify(k.fiyat), "| tipi:", typeof k.fiyat);
-        console.log("adet degeri:", JSON.stringify(k.adet), "| tipi:", typeof k.adet);
-      }
-      s.close(); process.exit(0);
-    }, 500);
-  }, 300);
-});
+
+const port = Number(process.env.PORT || 4000);
+const baseUrl = String(process.env.SMOKE_BASE_URL || `http://localhost:${port}`).replace(/\/$/, "");
+const isletmeSlug = String(process.env.SMOKE_ISLETME || "burger-plus").trim().toLowerCase();
+
+async function jsonGetir(yol, tenantGerekli = false) {
+  const headers = tenantGerekli ? { "X-Isletme": isletmeSlug } : {};
+  const yanit = await fetch(`${baseUrl}${yol}`, { headers });
+  const tip = yanit.headers.get("content-type") || "";
+  const veri = tip.includes("application/json") ? await yanit.json() : await yanit.text();
+  if (!yanit.ok) {
+    const mesaj = typeof veri === "object" ? veri?.hata : veri;
+    throw new Error(`${yol} başarısız (HTTP ${yanit.status}): ${mesaj || "Bilinmeyen hata"}`);
+  }
+  return veri;
+}
+
+async function socketiDogrula() {
+  const socket = io(baseUrl, {
+    auth: { isletme: isletmeSlug },
+    reconnection: false,
+    timeout: 5000,
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("connect_error", reject);
+    });
+  } finally {
+    socket.close();
+  }
+}
+
+try {
+  const saglik = await jsonGetir("/saglik");
+  const { isletme } = await jsonGetir(`/api/isletme/${encodeURIComponent(isletmeSlug)}`);
+  const { urunler = [] } = await jsonGetir("/api/urunler", true);
+  await socketiDogrula();
+  console.log(`Smoke test başarılı: ${saglik.durum || "ok"}, ${isletme.ad}, ${urunler.length} ürün, socket bağlı.`);
+} catch (hata) {
+  console.error("Smoke test başarısız:", hata?.message || hata);
+  process.exitCode = 1;
+}

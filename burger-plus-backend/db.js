@@ -623,13 +623,17 @@ export async function odemeIyzicoOlarakOnayla(isletmeId, id, token) {
 
 async function odemeBasariliOlarakIsle(isletmeId, id, saglayici, saglayiciToken, kullaniciId = null) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  // İyzico sonucu sağlayıcıdan doğrulanmış gerçek bir tahsilattır. Kullanıcı
+  // ödeme formundayken yerel taslak süresi dolsa bile alınmış ödemeyi reddetme.
+  // Simülasyonda ise eski taslakların onaylanmasını engellemeye devam et.
+  const sureKosulu = saglayici === "iyzico" ? "" : "AND son_gecerlilik > NOW()";
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
     const sonuc = await baglanti.query(
       `UPDATE odeme_islemleri
        SET durum='basarili', saglayici=$3, saglayici_token=COALESCE($4, saglayici_token), basarili_at=NOW(), guncelleme=NOW()
-       WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' AND son_gecerlilik > NOW()
+       WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' ${sureKosulu}
          AND ($5::int IS NULL OR kullanici_id=$5)
        RETURNING *`,
       [tenantId, id, saglayici, saglayiciToken, kullaniciId]
@@ -771,7 +775,7 @@ export async function odemeSaglayiciTokenKaydet(isletmeId, id, token) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await pool.query(
     `UPDATE odeme_islemleri SET saglayici='iyzico', saglayici_token=$3, guncelleme=NOW()
-     WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' RETURNING *`,
+     WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' AND son_gecerlilik > NOW() RETURNING *`,
     [tenantId, id, token]
   );
   if (!sonuc.rows.length) throw new Error("Ödeme taslağı ödeme başlatmak için uygun değil.");

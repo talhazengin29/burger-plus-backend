@@ -50,6 +50,14 @@ function emailGecerli(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+function telefonNormallestir(deger) {
+  const rakamlar = String(deger || "").replace(/\D/g, "");
+  if (/^05\d{9}$/.test(rakamlar)) return `+9${rakamlar}`;
+  if (/^5\d{9}$/.test(rakamlar)) return `+90${rakamlar}`;
+  if (/^90\d{10}$/.test(rakamlar)) return `+${rakamlar}`;
+  return "";
+}
+
 // --- Kayit ---
 export async function kayitOl(isletmeId, veri) {
   const tenantId = isletmeIdZorunlu(isletmeId);
@@ -57,14 +65,15 @@ export async function kayitOl(isletmeId, veri) {
   const soyad = String(veri?.soyad || "").trim().slice(0, 60);
   const cinsiyet = String(veri?.cinsiyet || "").trim().slice(0, 20);
   const email = String(veri?.email || "").trim().toLowerCase().slice(0, 254);
-  const telefon = String(veri?.telefon || "").trim().slice(0, 20);
+  const telefon = telefonNormallestir(veri?.telefon);
   const sifre = String(veri?.sifre || "");
   const davetKodu = String(veri?.davetKodu || "").trim().toUpperCase();
 
   // Dogrulama
-  if (!ad || !soyad || !email || !sifre) {
-    return { hata: "Ad, soyad, e-posta ve şifre zorunludur." };
+  if (!ad || !soyad || !cinsiyet || !email || !telefon || !sifre) {
+    return { hata: "Ad, soyad, cinsiyet, e-posta, telefon ve şifre zorunludur." };
   }
+  if (!["Kadın", "Erkek", "Diğer"].includes(cinsiyet)) return { hata: "Cinsiyet seçimi geçersiz." };
   if (!emailGecerli(email)) {
     return { hata: "Geçerli bir e-posta adresi girin." };
   }
@@ -72,6 +81,7 @@ export async function kayitOl(isletmeId, veri) {
     return { hata: "Şifre en az 8 karakter olmalıdır." };
   }
   if (sifre.length > 72) return { hata: "Şifre en fazla 72 karakter olabilir." };
+  if (/[\r\n\t]/.test(sifre)) return { hata: "Şifre satır sonu veya sekme içeremez." };
   if (davetKodu && !/^[A-HJ-NP-Z2-9]{8}$/.test(davetKodu)) {
     return { hata: "Davet kodu 8 karakterli ve geçerli biçimde olmalıdır." };
   }
@@ -355,8 +365,9 @@ export async function sifreyiSifirla(isletmeId, token, yeniSifre) {
   const temizToken = String(token || "").trim();
   const sifre = String(yeniSifre || "");
   if (!temizToken) return { hata: "Bağlantı geçersiz veya süresi dolmuş." };
-  if (sifre.length < 6) return { hata: "Şifre en az 6 karakter olmalıdır." };
+  if (sifre.length < 8) return { hata: "Şifre en az 8 karakter olmalıdır." };
   if (sifre.length > 72) return { hata: "Şifre en fazla 72 karakter olabilir." };
+  if (/[\r\n\t]/.test(sifre)) return { hata: "Şifre satır sonu veya sekme içeremez." };
 
   const sifreHash = await bcrypt.hash(sifre, 10);
   const sonuc = await sifreyiSifirlaDb(tenantId, tokenHashla(temizToken), sifreHash);

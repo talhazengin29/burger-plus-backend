@@ -442,11 +442,18 @@ app.get("/api/odeme/iyzico/:yanlisHost/odeme-basarili", (req, res) => {
 });
 
 app.get("/api/odeme/:id/sonuc", opsiyonelKullaniciMiddleware(), async (req, res) => {
-  const odeme = await odemeGetir(req.isletme.id, req.params.id);
+  let odeme = await odemeGetir(req.isletme.id, req.params.id);
   if (!odeme) return res.status(404).json({ hata: "Ödeme bulunamadı." });
   if (odeme.kullaniciId && !req.kullanici) return res.status(401).json({ hata: "Bu ödeme için giriş gerekli." });
   if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
     return res.status(403).json({ hata: "Bu ödeme başka bir hesaba ait." });
+  }
+  // Sağlayıcı ödemeyi onayladıktan sonra mutfak aktarımı geçici bir DB/socket
+  // hatasıyla yarıda kalmış olabilir. Kalem ekleme işlemi ödeme kimliğiyle
+  // idempotent olduğundan sonuç sorgusu güvenle yeniden deneyebilir.
+  if (odeme.durum === "basarili" && !odeme.mutfagaAktarildi) {
+    await onaylananOdemeyiMutfagaAktarGuvenli(odeme);
+    odeme = await odemeGetir(req.isletme.id, req.params.id) || odeme;
   }
   res.json({ odeme });
 });
