@@ -682,6 +682,13 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => console.log("Ayrildi:", socket.id));
 });
 
+// API istemcileri her durumda JSON bekler. Bilinmeyen bir API rotasinda
+// Express'in varsayilan HTML 404 sayfasini dondurmek JSON ayrıştırma hatasina
+// yol acar ve asil problemi gizler.
+app.use("/api", (_req, res) => {
+  res.status(404).json({ hata: "İstenen API servisi bulunamadı." });
+});
+
 app.use((err, _req, res, _next) => {
   if (err?.kod === "CORS_ENGELLENDI") {
     return res.status(403).json({ hata: "Bu adresin backend erişimine izin verilmiyor." });
