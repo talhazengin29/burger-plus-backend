@@ -11,8 +11,24 @@ function isletmeIdZorunlu(isletmeId) {
   return id;
 }
 
+async function sadakatAyariniGetir(isletmeId, veritabani) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const sonuc = await veritabani.query(
+    "SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='sadakat_kurulum_v1'",
+    [tenantId]
+  );
+  const ayar = sonuc.rows[0]?.deger || {};
+  const hedef = Number(ayar.hedefAdet);
+  return {
+    hedefAdet: Number.isInteger(hedef) && hedef >= 2 && hedef <= 100 ? hedef : BURGER_DAMGA_HEDEFI,
+    kategori: String(ayar.kategori || "Burgerler").trim().slice(0, 100) || "Burgerler",
+    odulMetni: String(ayar.odulMetni || "1 Burger Hediye").trim().slice(0, 120) || "1 Burger Hediye",
+  };
+}
+
 async function yeKazanOdulunuBulVeyaOlustur(isletmeId, baglanti, tercihEdilenUrunId = null) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  const sadakat = await sadakatAyariniGetir(tenantId, baglanti);
   const mevcut = await baglanti.query(
     `SELECT o.id FROM oduller o
      JOIN urunler u ON u.isletme_id=$1 AND u.id=o.urun_id
@@ -23,8 +39,8 @@ async function yeKazanOdulunuBulVeyaOlustur(isletmeId, baglanti, tercihEdilenUru
   );
   if (mevcut.rows.length) {
     await baglanti.query(
-      "UPDATE oduller SET aktif=true,arsivli=false,market_aktif=false,guncelleme=NOW() WHERE isletme_id=$1 AND id=$2",
-      [tenantId, mevcut.rows[0].id]
+      "UPDATE oduller SET ad=$3,aktif=true,arsivli=false,market_aktif=false,guncelleme=NOW() WHERE isletme_id=$1 AND id=$2",
+      [tenantId, mevcut.rows[0].id, sadakat.odulMetni]
     );
     return Number(mevcut.rows[0].id);
   }
@@ -32,28 +48,28 @@ async function yeKazanOdulunuBulVeyaOlustur(isletmeId, baglanti, tercihEdilenUru
   const tercihId = Number(tercihEdilenUrunId);
   const urun = await baglanti.query(
     `SELECT id,gorsel FROM urunler
-     WHERE isletme_id=$1 AND kategori='Burgerler' AND aktif=true AND arsivli=false
-       AND ($2::int IS NULL OR id=$2)
+     WHERE isletme_id=$1 AND kategori=$2 AND aktif=true AND arsivli=false
+       AND ($3::int IS NULL OR id=$3)
      ORDER BY id LIMIT 1`,
-    [tenantId, Number.isSafeInteger(tercihId) && tercihId > 0 ? tercihId : null]
+    [tenantId, sadakat.kategori, Number.isSafeInteger(tercihId) && tercihId > 0 ? tercihId : null]
   );
   const secilenUrun = urun.rows[0] || (await baglanti.query(
     `SELECT id,gorsel FROM urunler
-     WHERE isletme_id=$1 AND kategori='Burgerler' AND aktif=true AND arsivli=false
+     WHERE isletme_id=$1 AND kategori=$2 AND aktif=true AND arsivli=false
      ORDER BY id LIMIT 1`,
-    [tenantId]
+    [tenantId, sadakat.kategori]
   )).rows[0];
   if (!secilenUrun) return null;
 
   const sonuc = await baglanti.query(
     `INSERT INTO oduller
       (isletme_id,kod,ad,puan,urun_id,gorsel,market_aktif,aktif,arsivli)
-     VALUES ($1,'ye-kazan-burger','Ye Kazan Burger Hediyesi',0,$2,$3,false,true,false)
+     VALUES ($1,'ye-kazan-burger',$4,0,$2,$3,false,true,false)
      ON CONFLICT (isletme_id,kod) DO UPDATE SET
        urun_id=EXCLUDED.urun_id,gorsel=EXCLUDED.gorsel,
        market_aktif=false,aktif=true,arsivli=false,guncelleme=NOW()
      RETURNING id`,
-    [tenantId, secilenUrun.id, secilenUrun.gorsel || null]
+    [tenantId, secilenUrun.id, secilenUrun.gorsel || null, sadakat.odulMetni]
   );
   return Number(sonuc.rows[0].id);
 }
@@ -62,15 +78,17 @@ export async function sadakatTablolariHazirla(isletmeId, pool) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS burger_damga INTEGER NOT NULL DEFAULT 0");
   await pool.query("UPDATE kullanicilar SET puan=0 WHERE isletme_id=$1 AND puan < 0", [tenantId]);
-  await pool.query("UPDATE kullanicilar SET burger_damga=0 WHERE isletme_id=$1 AND (burger_damga < 0 OR burger_damga >= $2)", [tenantId, BURGER_DAMGA_HEDEFI]);
+  await pool.query("UPDATE kullanicilar SET burger_damga=0 WHERE isletme_id=$1 AND burger_damga < 0", [tenantId]);
   await pool.query(`
     DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='kullanicilar_puan_negatif_olamaz') THEN
         ALTER TABLE kullanicilar ADD CONSTRAINT kullanicilar_puan_negatif_olamaz CHECK (puan >= 0);
       END IF;
-      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='kullanicilar_burger_damga_araligi') THEN
-        ALTER TABLE kullanicilar ADD CONSTRAINT kullanicilar_burger_damga_araligi
-          CHECK (burger_damga >= 0 AND burger_damga < 5);
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='kullanicilar_burger_damga_araligi') THEN
+        ALTER TABLE kullanicilar DROP CONSTRAINT kullanicilar_burger_damga_araligi;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='kullanicilar_burger_damga_negatif_olamaz') THEN
+        ALTER TABLE kullanicilar ADD CONSTRAINT kullanicilar_burger_damga_negatif_olamaz CHECK (burger_damga >= 0);
       END IF;
     END $$
   `);
@@ -142,6 +160,7 @@ export async function sadakatTablolariHazirla(isletmeId, pool) {
 
 async function eskiSadakatiAktar(isletmeId, pool) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  const sadakat = await sadakatAyariniGetir(tenantId, pool);
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
@@ -156,19 +175,19 @@ async function eskiSadakatiAktar(isletmeId, pool) {
     const odulId = hediyeOdul.rows[0]?.id;
     const burgerler = await baglanti.query(`
       SELECT s.kullanici_id,
-        COALESCE(SUM(CASE WHEN kalem->>'kategori'='Burgerler' THEN
+        COALESCE(SUM(CASE WHEN kalem->>'kategori'=$2 THEN
           GREATEST(1,CASE WHEN COALESCE(kalem->>'adet','') ~ '^[0-9]+$'
             THEN (kalem->>'adet')::int ELSE 1 END) ELSE 0 END),0)::int AS adet
       FROM kullanici_siparisleri s
       CROSS JOIN LATERAL jsonb_array_elements(s.urunler) kalem
       WHERE s.isletme_id=$1 AND s.tutar > 0
       GROUP BY s.kullanici_id
-    `, [tenantId]);
+    `, [tenantId, sadakat.kategori]);
     for (const kayit of burgerler.rows) {
       const adet = Number(kayit.adet || 0);
-      await baglanti.query("UPDATE kullanicilar SET burger_damga=$1 WHERE isletme_id=$2 AND id=$3", [adet % BURGER_DAMGA_HEDEFI, tenantId, kayit.kullanici_id]);
+      await baglanti.query("UPDATE kullanicilar SET burger_damga=$1 WHERE isletme_id=$2 AND id=$3", [adet % sadakat.hedefAdet, tenantId, kayit.kullanici_id]);
       if (odulId) {
-        for (let sira = 0; sira < Math.floor(adet / BURGER_DAMGA_HEDEFI); sira += 1) {
+        for (let sira = 0; sira < Math.floor(adet / sadakat.hedefAdet); sira += 1) {
           await baglanti.query(
             `INSERT INTO kullanici_odulleri (isletme_id,kullanici_id,odul_id,kaynak_tur,harcanan_puan)
              VALUES ($1,$2,$3,'gecmis',0)`,
@@ -217,7 +236,8 @@ function hediyeyiDonustur(hediye) {
 
 export async function sadakatOzetiniGetir(isletmeId, pool, kullaniciId) {
   const tenantId = isletmeIdZorunlu(isletmeId);
-  const [kullanici, oduller, hareketler, hediyeler] = await Promise.all([
+  const [sadakat, kullanici, oduller, hareketler, hediyeler] = await Promise.all([
+    sadakatAyariniGetir(tenantId, pool),
     pool.query("SELECT puan,burger_damga FROM kullanicilar WHERE isletme_id=$1 AND id=$2", [tenantId, kullaniciId]),
     pool.query(`SELECT o.id,o.ad,o.puan,o.urun_id,o.gorsel FROM oduller o
       JOIN urunler u ON u.isletme_id=$1 AND u.id=o.urun_id
@@ -240,7 +260,7 @@ export async function sadakatOzetiniGetir(isletmeId, pool, kullaniciId) {
   return {
     puan: Number(kullanici.rows[0].puan || 0),
     burgerDamga: Number(kullanici.rows[0].burger_damga || 0),
-    burgerDamgaHedef: BURGER_DAMGA_HEDEFI,
+    burgerDamgaHedef: sadakat.hedefAdet,
     oduller: oduller.rows.map(oduluDonustur),
     puanGecmisi: hareketler.rows.map((hareket) => ({
       id: Number(hareket.id),
@@ -338,9 +358,10 @@ export async function adminOdulArsivle(isletmeId, pool, id) {
 
 export async function odemeSadakatiniUygula(isletmeId, baglanti, odeme) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  const sadakat = await sadakatAyariniGetir(tenantId, baglanti);
   if (!odeme.kullanici_id) return { burgerDamga: null, kazanilanHediye: 0 };
   const burgerAdet = (Array.isArray(odeme.urunler) ? odeme.urunler : [])
-    .filter((urun) => urun.kategori === "Burgerler")
+    .filter((urun) => urun.kategori === sadakat.kategori)
     .reduce((toplam, urun) => toplam + Math.max(1, Number(urun.adet || 1)), 0);
   if (!burgerAdet) {
     const mevcut = await baglanti.query("SELECT burger_damga FROM kullanicilar WHERE isletme_id=$1 AND id=$2", [tenantId, odeme.kullanici_id]);
@@ -350,18 +371,18 @@ export async function odemeSadakatiniUygula(isletmeId, baglanti, odeme) {
   const kullanici = await baglanti.query("SELECT burger_damga FROM kullanicilar WHERE isletme_id=$1 AND id=$2 FOR UPDATE", [tenantId, odeme.kullanici_id]);
   if (!kullanici.rows.length) throw new Error("Kullanıcı bulunamadı.");
   const toplam = Number(kullanici.rows[0]?.burger_damga || 0) + burgerAdet;
-  let kazanilanHediye = Math.floor(toplam / BURGER_DAMGA_HEDEFI);
-  let burgerDamga = toplam % BURGER_DAMGA_HEDEFI;
+  let kazanilanHediye = Math.floor(toplam / sadakat.hedefAdet);
+  let burgerDamga = toplam % sadakat.hedefAdet;
   let odulId = null;
 
   if (kazanilanHediye > 0) {
-    const burgerUrunu = odeme.urunler.find((urun) => urun.kategori === "Burgerler");
+    const burgerUrunu = odeme.urunler.find((urun) => urun.kategori === sadakat.kategori);
     odulId = await yeKazanOdulunuBulVeyaOlustur(tenantId, baglanti, burgerUrunu?.id);
     // Ürün kataloğu olağan dışı biçimde boşsa ödeme yine tamamlanır. Kullanıcının
     // ilerlemesi dört damgada korunur ve ürün düzeltildiğinde sonraki siparişte ödül kazanır.
     if (!odulId) {
       kazanilanHediye = 0;
-      burgerDamga = Math.min(BURGER_DAMGA_HEDEFI - 1, toplam);
+      burgerDamga = Math.min(sadakat.hedefAdet - 1, toplam);
     }
   }
 

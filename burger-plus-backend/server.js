@@ -64,6 +64,7 @@ import {
   mutfakKayitlariniGetir,
   musteriKayitlariniGetir,
   personelKayitlariniGetir,
+  kurulumAyarlariGetir,
 } from "./adminDb.js";
 import { gorselYukle, logoYukle, storageDosyasiniSil } from "./storage.js";
 import { temaCoz } from "./konseptler.js";
@@ -92,6 +93,8 @@ import {
   ciroRaporunuGetir, buyumeRaporunuGetir, siparisRaporunuGetir, kullaniciRaporunuGetir,
   abonelikleriGetir, abonelikOlustur, abonelikGuncelle, gelirRaporunuGetir,
 } from "./superAdminDb.js";
+import { sablonuGetir, slugOlustur } from "./sablonlar.js";
+import { isletmeKurulumunuYap, slugMusaitlikDurumu } from "./kurulumDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -545,7 +548,7 @@ function denetimIcinTemizle(deger, derinlik = 0) {
 function superAdminDenetimMiddleware(req, res, next) {
   if (!MUTASYON_METOTLARI.has(req.method)) return next();
   res.on("finish", () => {
-    if (!req.superAdmin?.id) return;
+    if (!req.superAdmin?.id || res.locals.denetimAtla) return;
     superAdminKaydiEkle(req.superAdmin.id, {
       islem: res.locals.denetimIslemi || `${req.method} ${req.originalUrl.split("?")[0]}`,
       hedefIsletmeId: res.locals.hedefIsletmeId || null,
@@ -579,6 +582,27 @@ app.post("/api/super/cikis", superAdmin, (req, res) => {
   res.locals.denetimIslemi = "super-admin-cikis";
   res.json({ basarili: true });
 });
+
+app.get("/api/super/sablonlar/:konsept", superAdmin, guvenli(async (req) => {
+  const konsept = String(req.params.konsept || "").trim().toLowerCase();
+  const sablon = sablonuGetir(konsept);
+  if (!sablon) throw new Error("Konsept yalnızca burger, cafe veya pizza olabilir.");
+  return { konsept, sablon };
+}));
+app.get("/api/super/slug-kontrol", superAdmin, guvenli(async (req) => {
+  const sonuc = await slugMusaitlikDurumu(req.query.slug);
+  return { ...sonuc, uretilenSlug: slugOlustur(req.query.slug) };
+}));
+app.post("/api/super/isletmeler/kurulum", superAdmin, guvenli(async (req, res) => {
+  const sonuc = await isletmeKurulumunuYap(
+    req.superAdmin.id,
+    req.body || {},
+    req.ip || req.socket.remoteAddress || ""
+  );
+  // Bu işlem günlüğü kurulum transaction'ı içinde yazıldı; ikinci bir kayıt oluşturma.
+  res.locals.denetimAtla = true;
+  return sonuc;
+}));
 
 app.get("/api/super/isletmeler", superAdmin, guvenli(async () => ({ isletmeler: await superIsletmeleriGetir() })));
 app.get("/api/super/isletmeler/:id", superAdmin, guvenli(async (req) => {
@@ -689,6 +713,7 @@ app.use("/api/admin", (req, res, next) => {
 
 app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
 app.get("/api/admin/ben", admin, (req, res) => res.json({ kullanici: req.kullanici, impersonation: req.impersonation || null }));
+app.get("/api/admin/kurulum-ayarlari", admin, guvenli((req) => kurulumAyarlariGetir(req.isletme.id)));
 app.put("/api/admin/tema", admin, guvenli(async (req) => {
   const isletme = await isletmeTemasiniGuncelle(req.isletme.id, req.body || {});
   const yanit = temaliIsletmeYaniti(isletme);

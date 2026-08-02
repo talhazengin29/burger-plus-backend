@@ -861,6 +861,16 @@ export async function dashboardGetir(isletmeId) {
   };
 }
 
+export async function kurulumAyarlariGetir(isletmeId) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const sonuc = await pool.query(
+    "SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='masa_sayisi'",
+    [tenantId]
+  );
+  const adet = Number(sonuc.rows[0]?.deger?.adet);
+  return { masaSayisi: Number.isInteger(adet) && adet >= 1 && adet <= 500 ? adet : 10 };
+}
+
 export async function satisRaporuGetir(isletmeId, gun = 30) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const aralik = Math.min(365, Math.max(1, sayi(gun, 30)));

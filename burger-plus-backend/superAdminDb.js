@@ -49,6 +49,7 @@ function isletmeDonustur(kayit) {
     kullaniciSayisi: sayi(kayit.kullanici_sayisi), personelSayisi: sayi(kayit.personel_sayisi),
     siparisSayisi: sayi(kayit.siparis_sayisi), toplamCiro: sayi(kayit.toplam_ciro),
     aylikCiro: sayi(kayit.aylik_ciro), aylikSiparis: sayi(kayit.aylik_siparis),
+    masaSayisi: Math.max(1, sayi(kayit.masa_sayisi) || 10),
     abonelik: kayit.abonelik_id ? {
       id: Number(kayit.abonelik_id), plan: kayit.abonelik_plan, aylikUcret: sayi(kayit.abonelik_ucret),
       durum: kayit.abonelik_durum, baslangicTarihi: kayit.abonelik_baslangic,
@@ -193,6 +194,7 @@ const ISLETME_METRIK_SQL = `
     COALESCE(k.adet,0)::int AS kullanici_sayisi,COALESCE(p.adet,0)::int AS personel_sayisi,
     COALESCE(o.adet,0)::int AS siparis_sayisi,COALESCE(o.ciro,0)::numeric AS toplam_ciro,
     COALESCE(o.aylik_ciro,0)::numeric AS aylik_ciro,COALESCE(o.aylik_adet,0)::int AS aylik_siparis,
+    COALESCE(m.masa_sayisi,10)::int AS masa_sayisi,
     a.id AS abonelik_id,a.plan AS abonelik_plan,a.aylik_ucret AS abonelik_ucret,
     a.durum AS abonelik_durum,a.baslangic_tarihi AS abonelik_baslangic,
     a.bitis_tarihi AS abonelik_bitis,a.notlar AS abonelik_notlar
@@ -206,6 +208,10 @@ const ISLETME_METRIK_SQL = `
       COUNT(*) FILTER (WHERE durum='basarili' AND basarili_at>=date_trunc('month',NOW())) AS aylik_adet
     FROM odeme_islemleri WHERE isletme_id=i.id
   ) o ON true
+  LEFT JOIN LATERAL (
+    SELECT CASE WHEN deger->>'adet' ~ '^[0-9]+$' THEN (deger->>'adet')::int ELSE 10 END AS masa_sayisi
+    FROM sistem_ayarlari WHERE isletme_id=i.id AND anahtar='masa_sayisi' LIMIT 1
+  ) m ON true
   LEFT JOIN LATERAL (SELECT * FROM abonelikler WHERE isletme_id=i.id ORDER BY olusturma DESC,id DESC LIMIT 1) a ON true`;
 
 export async function superIsletmeleriGetir() {
