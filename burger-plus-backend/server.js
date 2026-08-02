@@ -65,7 +65,8 @@ import {
   musteriKayitlariniGetir,
   personelKayitlariniGetir,
 } from "./adminDb.js";
-import { gorselYukle } from "./storage.js";
+import { gorselYukle, logoYukle, storageDosyasiniSil } from "./storage.js";
+import { temaCoz } from "./konseptler.js";
 import {
   kayitOl, girisYap, korumaliMiddleware, adminMiddleware, rolMiddleware,
   opsiyonelKullaniciMiddleware, tokenDogrula,
@@ -79,6 +80,7 @@ import {
 } from "./sadakatDb.js";
 import {
   isletmeTablosunuHazirla, isletmeMigrationunuCalistir, isletmeSlugIleGetir, isletmeIdIleGetir,
+  isletmeTemasiniGuncelle, isletmeLogosunuGuncelle,
 } from "./isletmeDb.js";
 
 const app = express();
@@ -117,7 +119,7 @@ const corsAyarlari = {
     hata.kod = "CORS_ENGELLENDI";
     callback(hata);
   },
-  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Isletme"],
 };
 // İyzico'nun ödeme sayfası callback'i tarayıcıdan otomatik form-post ile
@@ -168,10 +170,24 @@ const oda = (isletmeId, ad) => `i${isletmeId}:${ad}`;
 
 // Tenant bilgisini öğrenmek için kullanılan bu uç, doğal olarak henüz
 // X-Isletme başlığı gerektirmez. Diğer /api uçları aşağıdaki middleware'den geçer.
+function temaliIsletmeYaniti(isletme) {
+  return {
+    isletme: {
+      id: isletme.id,
+      slug: isletme.slug,
+      ad: isletme.ad,
+      konsept: isletme.konsept,
+      logoUrl: isletme.logoUrl,
+      aktif: isletme.aktif,
+    },
+    tema: temaCoz(isletme),
+  };
+}
+
 app.get("/api/isletme/:slug", async (req, res) => {
   const isletme = await isletmeSlugIleGetir(req.params.slug);
   if (!isletme?.aktif) return res.status(404).json({ hata: "İşletme bulunamadı." });
-  res.json({ isletme });
+  res.json(temaliIsletmeYaniti(isletme));
 });
 
 async function isletmeMiddleware(req, res, next) {
@@ -490,6 +506,34 @@ const guvenli = (islem) => async (req, res) => {
 };
 
 app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
+app.put("/api/admin/tema", admin, guvenli(async (req) => {
+  const isletme = await isletmeTemasiniGuncelle(req.isletme.id, req.body || {});
+  const yanit = temaliIsletmeYaniti(isletme);
+  io.to(oda(req.isletme.id, "genel")).emit("tema-guncellendi", yanit);
+  return yanit;
+}));
+app.post(
+  "/api/admin/logo",
+  admin,
+  express.raw({ type: ["image/png", "image/jpeg", "image/webp", "image/svg+xml"], limit: "2mb" }),
+  guvenli(async (req) => {
+    const eskiLogo = req.isletme.logoUrl;
+    const yeniLogo = await logoYukle(req.body, req.isletme.id, req.headers["content-type"]);
+    let isletme;
+    try {
+      isletme = await isletmeLogosunuGuncelle(req.isletme.id, yeniLogo);
+    } catch (hata) {
+      await storageDosyasiniSil(yeniLogo).catch(() => {});
+      throw hata;
+    }
+    if (eskiLogo && eskiLogo !== yeniLogo) {
+      await storageDosyasiniSil(eskiLogo).catch((hata) => console.error("Eski logo silinemedi:", hata.message));
+    }
+    const yanit = temaliIsletmeYaniti(isletme);
+    io.to(oda(req.isletme.id, "genel")).emit("tema-guncellendi", yanit);
+    return yanit;
+  })
+);
 app.get("/api/admin/urunler", admin, guvenli(async (req) => ({ urunler: await urunleriGetir(req.isletme.id, { tumu: true }) })));
 app.post("/api/admin/urunler", admin, guvenli(async (req) => {
   const t = req.isletme.id;
@@ -825,6 +869,9 @@ app.use("/api", (_req, res) => {
 });
 
 app.use((err, _req, res, _next) => {
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    return res.status(413).json({ hata: "Yüklenen dosya izin verilen boyutu aşıyor." });
+  }
   if (err?.kod === "CORS_ENGELLENDI") {
     return res.status(403).json({ hata: "Bu adresin backend erişimine izin verilmiyor." });
   }

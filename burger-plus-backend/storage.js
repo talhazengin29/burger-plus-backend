@@ -8,7 +8,18 @@ const GORSEL_TURLERI = [
   { mime: "image/avif", uzanti: "avif", eslesir: (veri) => veri.length >= 12 && veri.toString("ascii", 4, 8) === "ftyp" && ["avif", "avis"].includes(veri.toString("ascii", 8, 12)) },
   { mime: "image/bmp", uzanti: "bmp", eslesir: (veri) => veri.length >= 2 && veri.toString("ascii", 0, 2) === "BM" },
 ];
-const DESTEKLENEN_MIME_TURLERI = GORSEL_TURLERI.map((tur) => tur.mime);
+const SVG_TURU = {
+  mime: "image/svg+xml",
+  uzanti: "svg",
+  eslesir(veri) {
+    if (!veri.length || veri.length > 2 * 1024 * 1024 || veri.includes(0)) return false;
+    const metin = veri.toString("utf8").replace(/^\uFEFF/, "").trim();
+    if (!/^(?:<\?xml[^>]*>\s*)?<svg(?:\s|>)/i.test(metin)) return false;
+    return !/(?:<script|<foreignObject|<iframe|<object|<embed|<!DOCTYPE|javascript\s*:|\son[a-z]+\s*=)/i.test(metin);
+  },
+};
+const LOGO_TURLERI = [...GORSEL_TURLERI.filter((tur) => ["image/png", "image/jpeg", "image/webp"].includes(tur.mime)), SVG_TURU];
+const DESTEKLENEN_MIME_TURLERI = [...new Set([...GORSEL_TURLERI, SVG_TURU].map((tur) => tur.mime))];
 
 function ayarlariGetir() {
   const supabaseUrl = String(process.env.SUPABASE_URL || "").trim().replace(/\/$/, "");
@@ -22,7 +33,7 @@ function ayarlariGetir() {
 }
 
 async function bucketHazirla({ supabaseUrl, servisAnahtari, bucket }) {
-  const yanit = await fetch(`${supabaseUrl}/storage/v1/bucket`, {
+  let yanit = await fetch(`${supabaseUrl}/storage/v1/bucket`, {
     method: "POST",
     headers: {
       apikey: servisAnahtari,
@@ -48,20 +59,23 @@ async function bucketHazirla({ supabaseUrl, servisAnahtari, bucket }) {
   }
 }
 
-export async function gorselYukle(buffer) {
-  if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir görsel dosyası gönderilmelidir.");
-  const gorselTuru = GORSEL_TURLERI.find((tur) => tur.eslesir(buffer));
-  if (!gorselTuru) throw new Error("PNG, JPG/JPEG, WebP, GIF, AVIF veya BMP formatında geçerli bir görsel yükleyin.");
-  if (buffer.length > 5 * 1024 * 1024) throw new Error("Görsel en fazla 5 MB olabilir.");
+function dosyaTurunuBul(buffer, turler, bildirilenMime = "") {
+  const tur = turler.find((aday) => aday.eslesir(buffer));
+  const mime = String(bildirilenMime || "").split(";")[0].trim().toLowerCase();
+  if (!tur || (mime && mime !== tur.mime)) return null;
+  return tur;
+}
 
+async function nesneYukle(buffer, nesneYolu, dosyaTuru, enFazlaBayt, boyutMesaji) {
+  if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir görsel dosyası gönderilmelidir.");
+  if (buffer.length > enFazlaBayt) throw new Error(boyutMesaji);
   const ayarlar = ayarlariGetir();
-  const nesneYolu = `urunler/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${gorselTuru.uzanti}`;
   const yukle = () => fetch(`${ayarlar.supabaseUrl}/storage/v1/object/${ayarlar.bucket}/${nesneYolu}`, {
     method: "POST",
     headers: {
       apikey: ayarlar.servisAnahtari,
       Authorization: `Bearer ${ayarlar.servisAnahtari}`,
-      "Content-Type": gorselTuru.mime,
+      "Content-Type": dosyaTuru.mime,
       "Cache-Control": "public, max-age=31536000, immutable",
       "x-upsert": "false",
     },
@@ -78,4 +92,45 @@ export async function gorselYukle(buffer) {
     throw new Error(`Görsel yüklenemedi (${yanit.status}): ${ayrinti.slice(0, 160)}`);
   }
   return `${ayarlar.supabaseUrl}/storage/v1/object/public/${ayarlar.bucket}/${nesneYolu}`;
+}
+
+export async function gorselYukle(buffer) {
+  if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir görsel dosyası gönderilmelidir.");
+  const gorselTuru = dosyaTurunuBul(buffer, GORSEL_TURLERI);
+  if (!gorselTuru) throw new Error("PNG, JPG/JPEG, WebP, GIF, AVIF veya BMP formatında geçerli bir görsel yükleyin.");
+  const nesneYolu = `urunler/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${gorselTuru.uzanti}`;
+  return nesneYukle(buffer, nesneYolu, gorselTuru, 5 * 1024 * 1024, "Görsel en fazla 5 MB olabilir.");
+}
+
+export async function logoYukle(buffer, isletmeId, bildirilenMime) {
+  if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir logo dosyası gönderilmelidir.");
+  const logoTuru = dosyaTurunuBul(buffer, LOGO_TURLERI, bildirilenMime);
+  if (!logoTuru) throw new Error("Logo PNG, JPG/JPEG, WebP veya güvenli SVG formatında olmalıdır.");
+  const id = Number(isletmeId);
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error("isletmeId zorunlu");
+  const nesneYolu = `logolar/logo_${id}_${Date.now()}.${logoTuru.uzanti}`;
+  return nesneYukle(buffer, nesneYolu, logoTuru, 2 * 1024 * 1024, "Logo en fazla 2 MB olabilir.");
+}
+
+export async function storageDosyasiniSil(publicUrl) {
+  const url = String(publicUrl || "").trim();
+  if (!url) return false;
+  const ayarlar = ayarlariGetir();
+  const onEk = `${ayarlar.supabaseUrl}/storage/v1/object/public/${ayarlar.bucket}/`;
+  if (!url.startsWith(onEk)) return false;
+  const nesneYolu = url.slice(onEk.length).split("/").map(encodeURIComponent).join("/");
+  if (!nesneYolu) return false;
+  const yanit = await fetch(`${ayarlar.supabaseUrl}/storage/v1/object/${ayarlar.bucket}/${nesneYolu}`, {
+    method: "DELETE",
+    headers: {
+      apikey: ayarlar.servisAnahtari,
+      Authorization: `Bearer ${ayarlar.servisAnahtari}`,
+    },
+  });
+  if (yanit.status === 404) return true;
+  if (!yanit.ok) {
+    const ayrinti = await yanit.text();
+    throw new Error(`Eski logo silinemedi (${yanit.status}): ${ayrinti.slice(0, 160)}`);
+  }
+  return true;
 }

@@ -1,4 +1,5 @@
 import pool from "./db.js";
+import { KONSEPTLER, temaGirdisiniTemizle } from "./konseptler.js";
 
 const TENANT_TABLOLARI = [
   "kullanicilar",
@@ -250,11 +251,54 @@ export async function isletmeOlustur(veri = {}) {
   const logoUrl = String(veri.logoUrl || "").trim().slice(0, 1000) || null;
   if (!SLUG_DESENI.test(slug) || slug.length > 80) throw new Error("İşletme slug bilgisi geçersiz.");
   if (ad.length < 2) throw new Error("İşletme adı zorunludur.");
+  if (!KONSEPTLER[konsept]) throw new Error("Konsept yalnızca burger, cafe veya pizza olabilir.");
+  const temizTema = temaGirdisiniTemizle(veri.tema || {}, { konsept, tema: {} }).tema;
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const sonuc = await baglanti.query(
+      `INSERT INTO isletmeler (slug,ad,konsept,logo_url,tema,aktif)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6) RETURNING *`,
+      [slug, ad, konsept, logoUrl, JSON.stringify(temizTema), veri.aktif !== false]
+    );
+    const isletme = isletmeDonustur(sonuc.rows[0]);
+    for (const [sira, kategori] of KONSEPTLER[konsept].kategoriler.entries()) {
+      await baglanti.query(
+        `INSERT INTO kategoriler (isletme_id,ad,sira,aktif)
+         VALUES ($1,$2,$3,true) ON CONFLICT (isletme_id,ad) DO NOTHING`,
+        [isletme.id, kategori, (sira + 1) * 10]
+      );
+    }
+    await baglanti.query("COMMIT");
+    return isletme;
+  } catch (hata) {
+    await baglanti.query("ROLLBACK");
+    throw hata;
+  } finally {
+    baglanti.release();
+  }
+}
+
+export async function isletmeTemasiniGuncelle(isletmeId, girdi = {}) {
+  const id = isletmeIdDogrula(isletmeId);
+  const mevcut = await isletmeIdIleGetir(id);
+  if (!mevcut) throw new Error("İşletme bulunamadı.");
+  const temiz = temaGirdisiniTemizle(girdi, mevcut);
   const sonuc = await pool.query(
-    `INSERT INTO isletmeler (slug,ad,konsept,logo_url,tema,aktif)
-     VALUES ($1,$2,$3,$4,$5::jsonb,$6) RETURNING *`,
-    [slug, ad, konsept, logoUrl, JSON.stringify(veri.tema || {}), veri.aktif !== false]
+    `UPDATE isletmeler SET konsept=$2,tema=$3::jsonb WHERE id=$1 RETURNING *`,
+    [id, temiz.konsept, JSON.stringify(temiz.tema)]
   );
+  return isletmeDonustur(sonuc.rows[0]);
+}
+
+export async function isletmeLogosunuGuncelle(isletmeId, logoUrl) {
+  const id = isletmeIdDogrula(isletmeId);
+  const url = String(logoUrl || "").trim().slice(0, 1000) || null;
+  const sonuc = await pool.query(
+    "UPDATE isletmeler SET logo_url=$2 WHERE id=$1 RETURNING *",
+    [id, url]
+  );
+  if (!sonuc.rows.length) throw new Error("İşletme bulunamadı.");
   return isletmeDonustur(sonuc.rows[0]);
 }
 
