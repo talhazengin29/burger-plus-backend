@@ -136,7 +136,8 @@ export async function iyzicoSonucuGetir(odeme, token) {
   const ayniPara = (sol, sag) => Number.isFinite(sol) && Number.isFinite(sag) && Math.abs(sol - sag) < 0.01;
 
   if (sonuc.paymentStatus !== "SUCCESS") {
-    throw new Error(`İyzico ödeme sonucu başarısız: ${sonuc.paymentStatus || "BİLİNMİYOR"}.`);
+    const saglayiciMesaji = String(sonuc.errorMessage || sonuc.errorGroup || "").trim().slice(0, 180);
+    throw new Error(saglayiciMesaji || `İyzico ödeme sonucu başarısız: ${sonuc.paymentStatus || "BİLİNMİYOR"}.`);
   }
   // paidPrice taksit/komisyon maliyetini içerebilir. Sipariş tutarını İyzico'nun
   // price alanıyla doğrularız; karttan çekilen tutar sipariş tutarından az olamaz.

@@ -778,6 +778,15 @@ export async function odemeSaglayiciTokenKaydet(isletmeId, id, token) {
   return odemeDonustur(sonuc.rows[0]);
 }
 
+export async function odemeSaglayiciTokeniniGetir(isletmeId, id) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const sonuc = await pool.query(
+    "SELECT saglayici_token FROM odeme_islemleri WHERE isletme_id=$1 AND id=$2",
+    [tenantId, id]
+  );
+  return String(sonuc.rows[0]?.saglayici_token || "").trim() || null;
+}
+
 export async function iyzicoTokeniyleOdemeGetir(token) {
   // İyzico callback tenant başlığı göndermez; tenant bu benzersiz token ile
   // bulunan ödeme kaydındaki isletme_id alanından çözülür.

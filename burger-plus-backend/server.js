@@ -27,6 +27,7 @@ import pool, {
   odemeIyzicoOlarakOnayla,
   odemeGetir,
   odemeSaglayiciTokenKaydet,
+  odemeSaglayiciTokeniniGetir,
   iyzicoTokeniyleOdemeGetir,
   odemeMutfagaAktarildi,
 } from "./db.js";
@@ -397,25 +398,37 @@ app.post("/api/odeme/iyzico/callback", async (req, res) => {
     const callbackIsletmesi = await isletmeIdIleGetir(odeme.isletmeId);
     if (!callbackIsletmesi?.aktif) throw new Error("Ödemeye ait işletme bulunamadı.");
     odeme.slug = callbackIsletmesi.slug;
-    await iyzicoSonucuGetir(odeme, token);
-    const sonuc = await odemeIyzicoOlarakOnayla(odeme.isletmeId, odeme.id, token);
-    // Tahsilat doğrulanıp yerel ödeme başarılı işaretlendikten sonra operasyonel
-    // aktarım hatası müşteriye "ödeme başarısız" olarak gösterilmemeli.
-    try {
-      await onaylananOdemeyiMutfagaAktar(sonuc.odeme);
-    } catch (aktarimHatasi) {
-      console.error("Ödeme başarılı, mutfak aktarımı tamamlanamadı:", {
-        odemeId: sonuc.odeme.id,
-        isletmeId: sonuc.odeme.isletmeId,
-        mesaj: aktarimHatasi.message,
-      });
-    }
+    await iyzicoOdemesiniKesinlestir(odeme, token);
     res.redirect(303, iyzicoDonusAdresi(odeme.slug, odeme.id));
   } catch (e) {
     console.error("İyzico callback:", e.message);
     const donus = iyzicoDonusAdresi(odeme?.slug || "burger-plus", odeme?.id || "");
     const ayirac = donus.includes("?") ? "&" : "?";
     res.redirect(303, `${donus}${ayirac}odemeHatasi=${encodeURIComponent("Ödeme onaylanamadı.")}`);
+  }
+});
+
+// Callback ağ/proxy/yönlendirme nedeniyle tamamlanamazsa sonuç sayfası aynı
+// token'ı sunucu tarafında İyzico'dan sorgulayarak ödemeyi güvenle kesinleştirir.
+app.post("/api/odeme/:id/iyzico-dogrula", opsiyonelKullaniciMiddleware(), async (req, res) => {
+  try {
+    const odeme = await odemeGetir(req.isletme.id, req.params.id);
+    if (!odeme) return res.status(404).json({ hata: "Ödeme bulunamadı." });
+    if (odeme.kullaniciId && !req.kullanici) return res.status(401).json({ hata: "Bu ödeme için giriş gerekli." });
+    if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
+      return res.status(403).json({ hata: "Bu ödeme başka bir hesaba ait." });
+    }
+    if (odeme.durum === "basarili") {
+      await onaylananOdemeyiMutfagaAktarGuvenli(odeme);
+      return res.json({ odeme });
+    }
+    const token = await odemeSaglayiciTokeniniGetir(req.isletme.id, odeme.id);
+    if (!token) return res.status(409).json({ hata: "İyzico ödeme oturumu henüz hazır değil." });
+    const kesinlesen = await iyzicoOdemesiniKesinlestir(odeme, token);
+    res.json({ odeme: kesinlesen });
+  } catch (e) {
+    console.error("İyzico ödeme yeniden doğrulama:", { odemeId: req.params.id, mesaj: e.message });
+    res.status(409).json({ hata: e.message || "Ödeme henüz doğrulanamadı." });
   }
 });
 
@@ -595,6 +608,25 @@ app.get("/", (req, res) => res.send("Burger Plus backend calisiyor (PostgreSQL)"
 
 // Saglik kontrolu — Render/izleme araclari icin
 app.get("/saglik", (req, res) => res.json({ durum: "calisiyor", zaman: new Date().toISOString() }));
+
+async function onaylananOdemeyiMutfagaAktarGuvenli(odeme) {
+  try {
+    await onaylananOdemeyiMutfagaAktar(odeme);
+  } catch (aktarimHatasi) {
+    console.error("Ödeme başarılı, mutfak aktarımı tamamlanamadı:", {
+      odemeId: odeme.id,
+      isletmeId: odeme.isletmeId,
+      mesaj: aktarimHatasi.message,
+    });
+  }
+}
+
+async function iyzicoOdemesiniKesinlestir(odeme, token) {
+  await iyzicoSonucuGetir(odeme, token);
+  const sonuc = await odemeIyzicoOlarakOnayla(odeme.isletmeId, odeme.id, token);
+  await onaylananOdemeyiMutfagaAktarGuvenli(sonuc.odeme);
+  return sonuc.odeme;
+}
 
 async function onaylananOdemeyiMutfagaAktar(odeme) {
   if (odeme.mutfagaAktarildi) return;
