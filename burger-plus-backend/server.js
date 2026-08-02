@@ -76,6 +76,9 @@ import {
   sadakatTablolariHazirla, sadakatOzetiniGetir, puanlaOdulSatinAl,
   kullaniciOdulunuSipariseDonustur, adminOdulleriGetir, adminOdulKaydet, adminOdulArsivle,
 } from "./sadakatDb.js";
+import {
+  isletmeTablosunuHazirla, isletmeMigrationunuCalistir, isletmeSlugIleGetir, isletmeIdIleGetir,
+} from "./isletmeDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -114,7 +117,7 @@ const corsAyarlari = {
     callback(hata);
   },
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Isletme"],
 };
 // İyzico'nun ödeme sayfası callback'i tarayıcıdan otomatik form-post ile
 // gönderir; bu istek kendi domainini Origin header'ında taşır ve frontend
@@ -158,41 +161,68 @@ const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: corsAyarlari,
 });
+const oda = (isletmeId, ad) => `i${isletmeId}:${ad}`;
 
 // --- HTTP API ---
 
+// Tenant bilgisini öğrenmek için kullanılan bu uç, doğal olarak henüz
+// X-Isletme başlığı gerektirmez. Diğer /api uçları aşağıdaki middleware'den geçer.
+app.get("/api/isletme/:slug", async (req, res) => {
+  const isletme = await isletmeSlugIleGetir(req.params.slug);
+  if (!isletme?.aktif) return res.status(404).json({ hata: "İşletme bulunamadı." });
+  res.json({ isletme });
+});
+
+async function isletmeMiddleware(req, res, next) {
+  try {
+    const callbackMu = req.method === "POST" && req.path === "/odeme/iyzico/callback";
+    const eskiDonusMu = req.method === "GET" && /^\/odeme\/iyzico\/[^/]+\/odeme-basarili$/.test(req.path);
+    if (callbackMu || eskiDonusMu) return next();
+    const slug = req.headers["x-isletme"] || req.query.isletme;
+    if (!slug) return res.status(400).json({ hata: "İşletme belirtilmedi." });
+    const isletme = await isletmeSlugIleGetir(slug);
+    if (!isletme?.aktif) return res.status(404).json({ hata: "İşletme bulunamadı." });
+    req.isletme = isletme;
+    next();
+  } catch (hata) {
+    next(hata);
+  }
+}
+
+app.use("/api", isletmeMiddleware);
+
 // Kayit ol
 app.post("/api/kayit", kimlikLimiti, async (req, res) => {
-  const sonuc = await kayitOl(req.body);
+  const sonuc = await kayitOl(req.isletme.id, req.body);
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
 
 // Giris yap
 app.post("/api/giris", kimlikLimiti, async (req, res) => {
-  const sonuc = await girisYap(req.body);
+  const sonuc = await girisYap(req.isletme.id, req.body);
   if (sonuc.hata) return res.status(401).json(sonuc);
   res.json(sonuc);
 });
 
 app.post("/api/giris/2fa", ikiFaktorLimiti, async (req, res) => {
-  const sonuc = await ikiFaktorGirisiniTamamla(req.body?.ikiFaktorToken, req.body?.kod);
+  const sonuc = await ikiFaktorGirisiniTamamla(req.isletme.id, req.body?.ikiFaktorToken, req.body?.kod);
   if (sonuc.hata) return res.status(401).json(sonuc);
   res.json(sonuc);
 });
 
 // Sifremi unuttum: talep her zaman ayni mesajla doner (kullanici sizdirmaz).
 app.post("/api/sifre-sifirlama-talep", sifreSifirlamaLimiti, async (req, res) => {
-  await sifirlamaTalepEt(req.body?.email);
+  await sifirlamaTalepEt(req.isletme.id, req.isletme.slug, req.body?.email);
   res.json({ mesaj: "E-posta adresiniz kayıtlıysa sıfırlama bağlantısı gönderildi." });
 });
 
 app.get("/api/sifre-sifirla/dogrula", async (req, res) => {
-  res.json({ gecerli: await sifirlamaTokenGecerliMi(req.query?.token) });
+  res.json({ gecerli: await sifirlamaTokenGecerliMi(req.isletme.id, req.query?.token) });
 });
 
 app.post("/api/sifre-sifirla", async (req, res) => {
-  const sonuc = await sifreyiSifirla(req.body?.token, req.body?.yeniSifre);
+  const sonuc = await sifreyiSifirla(req.isletme.id, req.body?.token, req.body?.yeniSifre);
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
@@ -203,26 +233,26 @@ app.get("/api/ben", korumaliMiddleware(), (req, res) => {
 });
 
 app.post("/api/2fa/kurulum-baslat", ikiFaktorLimiti, korumaliMiddleware(), async (req, res) => {
-  const sonuc = await ikiFaktorKurulumBaslat(req.kullanici.id, req.body?.sifre);
+  const sonuc = await ikiFaktorKurulumBaslat(req.isletme.id, req.kullanici.id, req.body?.sifre);
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
 
 app.post("/api/2fa/kurulum-onayla", ikiFaktorLimiti, korumaliMiddleware(), async (req, res) => {
-  const sonuc = await ikiFaktorKurulumOnayla(req.kullanici.id, req.body?.kod);
+  const sonuc = await ikiFaktorKurulumOnayla(req.isletme.id, req.kullanici.id, req.body?.kod);
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
 
 app.post("/api/2fa/kapat", ikiFaktorLimiti, korumaliMiddleware(), async (req, res) => {
-  const sonuc = await ikiFaktorDevreDisiBirak(req.kullanici.id, req.body?.sifre, req.body?.kod);
+  const sonuc = await ikiFaktorDevreDisiBirak(req.isletme.id, req.kullanici.id, req.body?.sifre, req.body?.kod);
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
 
 app.get("/api/davetim", korumaliMiddleware(), async (req, res) => {
   try {
-    res.json({ davet: await davetOzetiniGetir(req.kullanici.id) });
+    res.json({ davet: await davetOzetiniGetir(req.isletme.id, req.kullanici.id) });
   } catch (e) {
     res.status(400).json({ hata: e.message || "Davet bilgileri alınamadı." });
   }
@@ -231,18 +261,18 @@ app.get("/api/davetim", korumaliMiddleware(), async (req, res) => {
 // Profil guncelle (email + telefon; ad/soyad/cinsiyet degismez)
 app.post("/api/profil", korumaliMiddleware(), async (req, res) => {
   const { email, telefon } = req.body || {};
-  const sonuc = await kullaniciProfilGuncelle(req.kullanici.id, { email, telefon });
+  const sonuc = await kullaniciProfilGuncelle(req.isletme.id, req.kullanici.id, { email, telefon });
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
 
 app.get("/api/siparislerim", korumaliMiddleware(), async (req, res) => {
-  res.json({ siparisler: await kullaniciSiparisleriniGetir(req.kullanici.id) });
+  res.json({ siparisler: await kullaniciSiparisleriniGetir(req.isletme.id, req.kullanici.id) });
 });
 
 app.get("/api/sadakat", korumaliMiddleware(), async (req, res) => {
   try {
-    res.json({ sadakat: await sadakatOzetiniGetir(pool, req.kullanici.id) });
+    res.json({ sadakat: await sadakatOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
   } catch (e) {
     res.status(400).json({ hata: e.message || "Sadakat bilgileri alinamadi." });
   }
@@ -250,8 +280,8 @@ app.get("/api/sadakat", korumaliMiddleware(), async (req, res) => {
 
 app.post("/api/sadakat/oduller/:id/satin-al", korumaliMiddleware(), async (req, res) => {
   try {
-    await puanlaOdulSatinAl(pool, req.kullanici.id, req.params.id, req.body?.istekAnahtari);
-    res.json({ sadakat: await sadakatOzetiniGetir(pool, req.kullanici.id) });
+    await puanlaOdulSatinAl(req.isletme.id, pool, req.kullanici.id, req.params.id, req.body?.istekAnahtari);
+    res.json({ sadakat: await sadakatOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
   } catch (e) {
     res.status(400).json({ hata: e.message || "Odul alinamadi." });
   }
@@ -261,12 +291,12 @@ app.post("/api/sadakat/hediyeler/:id/kullan", korumaliMiddleware(), async (req, 
   try {
     const kisiAdi = `${req.kullanici.ad} ${req.kullanici.soyad}`.trim();
     const odeme = await kullaniciOdulunuSipariseDonustur(
-      pool, req.kullanici.id, req.params.id, req.body?.masaNo, kisiAdi
+      req.isletme.id, pool, req.kullanici.id, req.params.id, req.body?.masaNo, kisiAdi
     );
     await onaylananOdemeyiMutfagaAktar(odeme);
     res.json({
       odeme: { ...odeme, mutfagaAktarildi: true },
-      sadakat: await sadakatOzetiniGetir(pool, req.kullanici.id),
+      sadakat: await sadakatOzetiniGetir(req.isletme.id, pool, req.kullanici.id),
     });
   } catch (e) {
     res.status(400).json({ hata: e.message || "Hediye kullanilamadi." });
@@ -276,28 +306,28 @@ app.post("/api/sadakat/hediyeler/:id/kullan", korumaliMiddleware(), async (req, 
 app.get("/api/masa/:masaNo", async (req, res) => {
   const masaNo = guvenliMasaNo(req.params.masaNo);
   if (!masaNo) return res.status(400).json({ hata: "Masa numarasi gecersiz." });
-  res.json(await masaSiparisleriniGetir(masaNo));
+  res.json(await masaSiparisleriniGetir(req.isletme.id, masaNo));
 });
 
 app.get("/api/mutfak", rolMiddleware(["mutfak", "salon", "kasiyer"]), async (req, res) => {
-  res.json(await tumAcikMasalar());
+  res.json(await tumAcikMasalar(req.isletme.id));
 });
 // Aktif ürün kataloğu müşteri uygulamasına açıktır.
-app.get("/api/urunler", async (_req, res) => {
-  res.json({ urunler: await urunleriGetir() });
+app.get("/api/urunler", async (req, res) => {
+  res.json({ urunler: await urunleriGetir(req.isletme.id) });
 });
 app.get("/api/oneriler", async (req, res) => {
   const urunIdleri = String(req.query.urunler || "")
     .split(",").map(Number).filter((id) => Number.isInteger(id) && id > 0).slice(0, 30);
-  res.json({ urunler: await onerileriGetir(urunIdleri) });
+  res.json({ urunler: await onerileriGetir(req.isletme.id, urunIdleri) });
 });
-app.get("/api/kategoriler", async (_req, res) => {
-  res.json({ kategoriler: await kategorileriGetir() });
+app.get("/api/kategoriler", async (req, res) => {
+  res.json({ kategoriler: await kategorileriGetir(req.isletme.id) });
 });
-app.get("/api/duyurular", async (_req, res) => {
-  res.json({ duyurular: await duyurulariGetir() });
+app.get("/api/duyurular", async (req, res) => {
+  res.json({ duyurular: await duyurulariGetir(req.isletme.id) });
 });
-app.get("/api/kampanyalar", async (_req, res) => { res.json({ kampanyalar: await kampanyalariGetir() }); });
+app.get("/api/kampanyalar", async (req, res) => { res.json({ kampanyalar: await kampanyalariGetir(req.isletme.id) }); });
 
 // Ödeme sağlayıcısı bağlanmadan önce de sipariş ve tutar backend'de güvenli
 // taslak olarak hazırlanır. İyzico entegrasyonunda yalnızca onay endpointi
@@ -306,7 +336,7 @@ app.post("/api/odeme/taslak", opsiyonelKullaniciMiddleware(), async (req, res) =
   try {
     const kullanici = req.kullanici || null;
     const kisiAdi = kullanici ? `${kullanici.ad} ${kullanici.soyad}` : "Misafir";
-    const odeme = await odemeTaslagiOlustur({
+    const odeme = await odemeTaslagiOlustur(req.isletme.id, {
       kullaniciId: kullanici?.id || null,
       masaNo: req.body?.masaNo || null,
       yontem: req.body?.yontem,
@@ -326,7 +356,7 @@ app.post("/api/odeme/:id/simulasyon-onay", opsiyonelKullaniciMiddleware(), async
     return res.status(404).json({ hata: "Kaynak bulunamadi." });
   }
   try {
-    const sonuc = await odemeSimulasyonOnayla(req.params.id, req.kullanici?.id || null);
+    const sonuc = await odemeSimulasyonOnayla(req.isletme.id, req.params.id, req.kullanici?.id || null);
     const odeme = sonuc.odeme;
     await onaylananOdemeyiMutfagaAktar(odeme);
     res.json({ odeme: { ...odeme, mutfagaAktarildi: true } });
@@ -337,7 +367,7 @@ app.post("/api/odeme/:id/simulasyon-onay", opsiyonelKullaniciMiddleware(), async
 
 app.post("/api/odeme/:id/iyzico-baslat", opsiyonelKullaniciMiddleware(), async (req, res) => {
   try {
-    const odeme = await odemeGetir(req.params.id);
+    const odeme = await odemeGetir(req.isletme.id, req.params.id);
     if (!odeme) return res.status(404).json({ hata: "Ödeme taslağı bulunamadı." });
     if (odeme.kullaniciId && !req.kullanici) return res.status(401).json({ hata: "Bu ödeme için giriş gerekli." });
     if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
@@ -345,7 +375,7 @@ app.post("/api/odeme/:id/iyzico-baslat", opsiyonelKullaniciMiddleware(), async (
     }
     if (odeme.durum !== "bekliyor") return res.status(400).json({ hata: "Bu ödeme taslağı yeniden başlatılamaz." });
     const form = await iyzicoCheckoutBaslat(odeme, req.body?.alici, req.ip);
-    await odemeSaglayiciTokenKaydet(odeme.id, form.token);
+    await odemeSaglayiciTokenKaydet(req.isletme.id, odeme.id, form.token);
     res.json({ paymentPageUrl: form.paymentPageUrl });
   } catch (e) {
     console.error("İyzico ödeme formu başlatılamadı:", {
@@ -364,13 +394,16 @@ app.post("/api/odeme/iyzico/callback", async (req, res) => {
     if (!token) throw new Error("İyzico ödeme tokenı bulunamadı.");
     odeme = await iyzicoTokeniyleOdemeGetir(token);
     if (!odeme) throw new Error("Ödeme oturumu bulunamadı.");
+    const callbackIsletmesi = await isletmeIdIleGetir(odeme.isletmeId);
+    if (!callbackIsletmesi?.aktif) throw new Error("Ödemeye ait işletme bulunamadı.");
+    odeme.slug = callbackIsletmesi.slug;
     await iyzicoSonucuGetir(odeme, token);
-    const sonuc = await odemeIyzicoOlarakOnayla(odeme.id, token);
+    const sonuc = await odemeIyzicoOlarakOnayla(odeme.isletmeId, odeme.id, token);
     await onaylananOdemeyiMutfagaAktar(sonuc.odeme);
-    res.redirect(303, iyzicoDonusAdresi(odeme.id));
+    res.redirect(303, iyzicoDonusAdresi(odeme.slug, odeme.id));
   } catch (e) {
     console.error("İyzico callback:", e.message);
-    const donus = iyzicoDonusAdresi(odeme?.id || "");
+    const donus = iyzicoDonusAdresi(odeme?.slug || "burger-plus", odeme?.id || "");
     const ayirac = donus.includes("?") ? "&" : "?";
     res.redirect(303, `${donus}${ayirac}odemeHatasi=${encodeURIComponent("Ödeme onaylanamadı.")}`);
   }
@@ -381,11 +414,12 @@ app.post("/api/odeme/iyzico/callback", async (req, res) => {
 // yapılandırılmış frontend adresine taşıyan uyumluluk rotası.
 app.get("/api/odeme/iyzico/:yanlisHost/odeme-basarili", (req, res) => {
   const odemeId = String(req.query?.odeme || "").trim();
-  res.redirect(303, iyzicoDonusAdresi(odemeId));
+  const slug = String(req.query?.isletme || "burger-plus").trim();
+  res.redirect(303, iyzicoDonusAdresi(slug, odemeId));
 });
 
 app.get("/api/odeme/:id/sonuc", opsiyonelKullaniciMiddleware(), async (req, res) => {
-  const odeme = await odemeGetir(req.params.id);
+  const odeme = await odemeGetir(req.isletme.id, req.params.id);
   if (!odeme) return res.status(404).json({ hata: "Ödeme bulunamadı." });
   if (odeme.kullaniciId && !req.kullanici) return res.status(401).json({ hata: "Bu ödeme için giriş gerekli." });
   if (req.kullanici && odeme.kullaniciId && Number(req.kullanici.id) !== Number(odeme.kullaniciId)) {
@@ -398,7 +432,7 @@ app.post("/api/yerel-admin-kurulum", yerelAdminKurulum);
 app.get("/api/yerel-admin-durum", async (req, res) => {
   const ip = req.socket.remoteAddress || "";
   if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) return res.json({ kurulumGerekli: false });
-  res.json({ kurulumGerekli: await yerelAdminKurulumGerekli() });
+  res.json({ kurulumGerekli: await yerelAdminKurulumGerekli(req.isletme.id) });
 });
 
 async function yerelAdminKurulum(req, res) {
@@ -407,7 +441,7 @@ async function yerelAdminKurulum(req, res) {
     if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) {
       return res.status(403).json({ hata: "İlk admin kurulumu yalnızca bu bilgisayardan yapılabilir." });
     }
-    await ilkYerelAdminOlustur(req.body || {});
+    await ilkYerelAdminOlustur(req.isletme.id, req.body || {});
     res.json({ basarili: true });
   } catch (e) {
     res.status(400).json({ hata: e.message });
@@ -425,90 +459,127 @@ const guvenli = (islem) => async (req, res) => {
   }
 };
 
-app.get("/api/admin/dashboard", admin, guvenli(() => dashboardGetir()));
-app.get("/api/admin/urunler", admin, guvenli(async () => ({ urunler: await urunleriGetir({ tumu: true }) })));
+app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
+app.get("/api/admin/urunler", admin, guvenli(async (req) => ({ urunler: await urunleriGetir(req.isletme.id, { tumu: true }) })));
 app.post("/api/admin/urunler", admin, guvenli(async (req) => {
-  const eski = req.body.id ? await yonetimVarliginiGetir("urun", req.body.id) : null;
-  const urun = await urunKaydet(req.body);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "urun", varlikId: urun.id, islem: eski ? "guncelleme" : "ekleme", aciklama: eski ? `${urun.ad} ürünü güncellendi.` : `${urun.ad} ürünü eklendi.`, eskiDeger: eski, yeniDeger: urun });
-  io.emit("urunler-guncellendi", await urunleriGetir());
+  const t = req.isletme.id;
+  const eski = req.body.id ? await yonetimVarliginiGetir(t, "urun", req.body.id) : null;
+  const urun = await urunKaydet(t, req.body);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "urun", varlikId: urun.id, islem: eski ? "guncelleme" : "ekleme", aciklama: eski ? `${urun.ad} ürünü güncellendi.` : `${urun.ad} ürünü eklendi.`, eskiDeger: eski, yeniDeger: urun });
+  io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
   return { urun };
 }));
 app.patch("/api/admin/urunler/:id/aktif", admin, guvenli(async (req) => {
-  const eski = await yonetimVarliginiGetir("urun", req.params.id);
-  await urunAktiflikDegistir(req.params.id, req.body.aktif);
-  const yeni = await yonetimVarliginiGetir("urun", req.params.id);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "urun", varlikId: req.params.id, islem: "durum", aciklama: `${eski?.ad || "Ürün"} ${req.body.aktif ? "yayına alındı" : "pasife alındı"}.`, eskiDeger: eski, yeniDeger: yeni });
-  io.emit("urunler-guncellendi", await urunleriGetir());
+  const t = req.isletme.id;
+  const eski = await yonetimVarliginiGetir(t, "urun", req.params.id);
+  await urunAktiflikDegistir(t, req.params.id, req.body.aktif);
+  const yeni = await yonetimVarliginiGetir(t, "urun", req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "urun", varlikId: req.params.id, islem: "durum", aciklama: `${eski?.ad || "Ürün"} ${req.body.aktif ? "yayına alındı" : "pasife alındı"}.`, eskiDeger: eski, yeniDeger: yeni });
+  io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
 }));
 app.delete("/api/admin/urunler/:id", admin, guvenli(async (req) => {
-  const eski = await yonetimVarliginiGetir("urun", req.params.id);
-  await urunArsivle(req.params.id);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "urun", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Ürün"} katalogdan arşivlendi.`, eskiDeger: eski });
-  io.emit("urunler-guncellendi", await urunleriGetir());
+  const t = req.isletme.id;
+  const eski = await yonetimVarliginiGetir(t, "urun", req.params.id);
+  await urunArsivle(t, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "urun", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Ürün"} katalogdan arşivlendi.`, eskiDeger: eski });
+  io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
 }));
 app.post("/api/admin/gorseller", admin, express.raw({ type: "image/*", limit: "5mb" }), guvenli(async (req) => {
   const gorsel = await gorselYukle(req.body);
   return { gorsel };
 }));
-app.get("/api/admin/kategoriler", admin, guvenli(async () => ({ kategoriler: await kategorileriGetir({ tumu: true }) })));
+app.get("/api/admin/kategoriler", admin, guvenli(async (req) => ({ kategoriler: await kategorileriGetir(req.isletme.id, { tumu: true }) })));
 app.post("/api/admin/kategoriler", admin, guvenli(async (req) => {
-  const eski = req.body.id ? await yonetimVarliginiGetir("kategori", req.body.id) : null;
-  const kategori = await kategoriKaydet(req.body);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "kategori", varlikId: kategori.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${kategori.ad} kategorisi ${eski ? "güncellendi" : "eklendi"}.`, eskiDeger: eski, yeniDeger: kategori });
-  io.emit("kategoriler-guncellendi", await kategorileriGetir());
-  io.emit("urunler-guncellendi", await urunleriGetir());
+  const t = req.isletme.id;
+  const eski = req.body.id ? await yonetimVarliginiGetir(t, "kategori", req.body.id) : null;
+  const kategori = await kategoriKaydet(t, req.body);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "kategori", varlikId: kategori.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${kategori.ad} kategorisi ${eski ? "güncellendi" : "eklendi"}.`, eskiDeger: eski, yeniDeger: kategori });
+  io.to(oda(t, "genel")).emit("kategoriler-guncellendi", await kategorileriGetir(t));
+  io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
   return { kategori };
 }));
 app.delete("/api/admin/kategoriler/:id", admin, guvenli(async (req) => {
-  const eski = await yonetimVarliginiGetir("kategori", req.params.id);
-  await kategoriArsivle(req.params.id);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "kategori", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Kategori"} arşivlendi.`, eskiDeger: eski });
-  io.emit("kategoriler-guncellendi", await kategorileriGetir());
+  const t = req.isletme.id;
+  const eski = await yonetimVarliginiGetir(t, "kategori", req.params.id);
+  await kategoriArsivle(t, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "kategori", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Kategori"} arşivlendi.`, eskiDeger: eski });
+  io.to(oda(t, "genel")).emit("kategoriler-guncellendi", await kategorileriGetir(t));
 }));
-app.get("/api/admin/personeller", admin, guvenli(async () => ({ personeller: await personelleriGetir() })));
+app.get("/api/admin/personeller", admin, guvenli(async (req) => ({ personeller: await personelleriGetir(req.isletme.id) })));
 app.post("/api/admin/personeller", admin, guvenli(async (req) => {
-  const eski = req.body.id ? await yonetimVarliginiGetir("personel", req.body.id) : null;
-  const personel = await personelKaydet(req.body);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "personel", varlikId: personel.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${personel.ad} ${personel.soyad} personel kaydı ${eski ? "güncellendi" : "eklendi"}.`, eskiDeger: eski, yeniDeger: personel });
+  const t = req.isletme.id;
+  const eski = req.body.id ? await yonetimVarliginiGetir(t, "personel", req.body.id) : null;
+  const personel = await personelKaydet(t, req.body);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "personel", varlikId: personel.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${personel.ad} ${personel.soyad} personel kaydı ${eski ? "güncellendi" : "eklendi"}.`, eskiDeger: eski, yeniDeger: personel });
   return { personel };
 }));
 app.delete("/api/admin/personeller/:id", admin, guvenli(async (req) => {
-  const eski = await yonetimVarliginiGetir("personel", req.params.id);
-  await personelArsivle(req.params.id);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "personel", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Personel"} ${eski?.soyad || ""} ekipten arşivlendi.`, eskiDeger: eski });
+  const t = req.isletme.id;
+  const eski = await yonetimVarliginiGetir(t, "personel", req.params.id);
+  await personelArsivle(t, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "personel", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Personel"} ${eski?.soyad || ""} ekipten arşivlendi.`, eskiDeger: eski });
 }));
 app.post("/api/admin/personeller/:id/vardiya", admin, guvenli(async (req) => {
-  await vardiyaDegistir(req.params.id, req.body.islem);
-  const personel = await yonetimVarliginiGetir("personel", req.params.id);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "vardiya", varlikId: req.params.id, islem: req.body.islem, aciklama: `${personel?.ad || "Personel"} için vardiya ${req.body.islem === "giris" ? "başlatıldı" : "kapatıldı"}.` });
+  const t = req.isletme.id;
+  await vardiyaDegistir(t, req.params.id, req.body.islem);
+  const personel = await yonetimVarliginiGetir(t, "personel", req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "vardiya", varlikId: req.params.id, islem: req.body.islem, aciklama: `${personel?.ad || "Personel"} için vardiya ${req.body.islem === "giris" ? "başlatıldı" : "kapatıldı"}.` });
 }));
-app.get("/api/admin/raporlar/satis", admin, guvenli((req) => satisRaporuGetir(req.query.gun)));
-app.get("/api/admin/satislar/canli", admin, guvenli(async (req) => ({ satislar: await canliSatislariGetir(req.query) })));
-app.get("/api/admin/satislar/gecmis", admin, guvenli(async (req) => ({ satislar: await gecmisSatislariGetir(req.query) })));
-app.get("/api/admin/kayitlar/mutfak", admin, guvenli(async (req) => ({ kayitlar: await mutfakKayitlariniGetir(req.query) })));
-app.get("/api/admin/kayitlar/musteriler", admin, guvenli(async (req) => ({ musteriler: await musteriKayitlariniGetir(req.query) })));
-app.get("/api/admin/kayitlar/personel", admin, guvenli(async (req) => personelKayitlariniGetir(req.query)));
-app.get("/api/admin/revizyonlar", admin, guvenli(async (req) => ({ revizyonlar: await revizyonKayitlariniGetir(req.query) })));
-app.get("/api/admin/duyurular", admin, guvenli(async () => ({ duyurular: await duyurulariGetir({ tumu: true }) })));
+app.get("/api/admin/raporlar/satis", admin, guvenli((req) => satisRaporuGetir(req.isletme.id, req.query.gun)));
+app.get("/api/admin/satislar/canli", admin, guvenli(async (req) => ({ satislar: await canliSatislariGetir(req.isletme.id, req.query) })));
+app.get("/api/admin/satislar/gecmis", admin, guvenli(async (req) => ({ satislar: await gecmisSatislariGetir(req.isletme.id, req.query) })));
+app.get("/api/admin/kayitlar/mutfak", admin, guvenli(async (req) => ({ kayitlar: await mutfakKayitlariniGetir(req.isletme.id, req.query) })));
+app.get("/api/admin/kayitlar/musteriler", admin, guvenli(async (req) => ({ musteriler: await musteriKayitlariniGetir(req.isletme.id, req.query) })));
+app.get("/api/admin/kayitlar/personel", admin, guvenli(async (req) => personelKayitlariniGetir(req.isletme.id, req.query)));
+app.get("/api/admin/revizyonlar", admin, guvenli(async (req) => ({ revizyonlar: await revizyonKayitlariniGetir(req.isletme.id, req.query) })));
+app.get("/api/admin/duyurular", admin, guvenli(async (req) => ({ duyurular: await duyurulariGetir(req.isletme.id, { tumu: true }) })));
 app.post("/api/admin/duyurular", admin, guvenli(async (req) => {
-  const duyuru = await duyuruKaydet(req.body);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "duyuru", varlikId: duyuru.id, islem: "ekleme", aciklama: `${duyuru.baslik} duyurusu yayınlandı.`, yeniDeger: duyuru });
-  io.emit("duyurular-guncellendi", await duyurulariGetir());
+  const t = req.isletme.id;
+  const duyuru = await duyuruKaydet(t, req.body);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "duyuru", varlikId: duyuru.id, islem: "ekleme", aciklama: `${duyuru.baslik} duyurusu yayınlandı.`, yeniDeger: duyuru });
+  io.to(oda(t, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(t));
   return { duyuru };
 }));
 app.delete("/api/admin/duyurular/:id", admin, guvenli(async (req) => {
-  const eski = await yonetimVarliginiGetir("duyuru", req.params.id);
-  await duyuruArsivle(req.params.id);
-  await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "duyuru", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.baslik || "Duyuru"} yayından kaldırıldı.`, eskiDeger: eski });
-  io.emit("duyurular-guncellendi", await duyurulariGetir());
+  const t = req.isletme.id;
+  const eski = await yonetimVarliginiGetir(t, "duyuru", req.params.id);
+  await duyuruArsivle(t, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "duyuru", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.baslik || "Duyuru"} yayından kaldırıldı.`, eskiDeger: eski });
+  io.to(oda(t, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(t));
 }));
-app.get("/api/admin/kampanyalar", admin, guvenli(async () => ({ kampanyalar: await kampanyalariGetir({ tumu: true }) })));
-app.post("/api/admin/kampanyalar", admin, guvenli(async (req) => { const eski = req.body.id ? await yonetimVarliginiGetir("kampanya", req.body.id) : null; const kampanya = await kampanyaKaydet(req.body); await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "kampanya", varlikId: kampanya.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${kampanya.baslik} kampanyası ${eski ? "güncellendi" : "oluşturuldu"}.`, eskiDeger: eski, yeniDeger: kampanya }); io.emit("kampanyalar-guncellendi", await kampanyalariGetir()); return { kampanya }; }));
-app.delete("/api/admin/kampanyalar/:id", admin, guvenli(async (req) => { const eski = await yonetimVarliginiGetir("kampanya", req.params.id); await kampanyaArsivle(req.params.id); await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "kampanya", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.baslik || "Kampanya"} arşivlendi.`, eskiDeger: eski }); io.emit("kampanyalar-guncellendi", await kampanyalariGetir()); }));
-app.get("/api/admin/oduller", admin, guvenli(async () => ({ oduller: await adminOdulleriGetir(pool) })));
-app.post("/api/admin/oduller", admin, guvenli(async (req) => { const eski = req.body.id ? await yonetimVarliginiGetir("odul", req.body.id) : null; const oduller = await adminOdulKaydet(pool, req.body); const yeni = req.body.id ? await yonetimVarliginiGetir("odul", req.body.id) : [...oduller].filter((odul) => odul.ad === String(req.body.ad || "").trim() && Number(odul.urunId) === Number(req.body.urunId)).sort((a, b) => Number(b.id) - Number(a.id))[0]; await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "odul", varlikId: yeni?.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${req.body.ad || "Ödül"} puan marketinde ${eski ? "güncellendi" : "oluşturuldu"}.`, eskiDeger: eski, yeniDeger: yeni }); io.emit("oduller-guncellendi"); return { oduller }; }));
-app.delete("/api/admin/oduller/:id", admin, guvenli(async (req) => { const eski = await yonetimVarliginiGetir("odul", req.params.id); await adminOdulArsivle(pool, req.params.id); await revizyonKaydet({ yapan: req.kullanici, varlikTuru: "odul", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Ödül"} puan marketinden arşivlendi.`, eskiDeger: eski }); io.emit("oduller-guncellendi"); }));
+app.get("/api/admin/kampanyalar", admin, guvenli(async (req) => ({ kampanyalar: await kampanyalariGetir(req.isletme.id, { tumu: true }) })));
+app.post("/api/admin/kampanyalar", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const eski = req.body.id ? await yonetimVarliginiGetir(t, "kampanya", req.body.id) : null;
+  const kampanya = await kampanyaKaydet(t, req.body);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "kampanya", varlikId: kampanya.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${kampanya.baslik} kampanyası ${eski ? "güncellendi" : "oluşturuldu"}.`, eskiDeger: eski, yeniDeger: kampanya });
+  io.to(oda(t, "genel")).emit("kampanyalar-guncellendi", await kampanyalariGetir(t));
+  return { kampanya };
+}));
+app.delete("/api/admin/kampanyalar/:id", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const eski = await yonetimVarliginiGetir(t, "kampanya", req.params.id);
+  await kampanyaArsivle(t, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "kampanya", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.baslik || "Kampanya"} arşivlendi.`, eskiDeger: eski });
+  io.to(oda(t, "genel")).emit("kampanyalar-guncellendi", await kampanyalariGetir(t));
+}));
+app.get("/api/admin/oduller", admin, guvenli(async (req) => ({ oduller: await adminOdulleriGetir(req.isletme.id, pool) })));
+app.post("/api/admin/oduller", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const eski = req.body.id ? await yonetimVarliginiGetir(t, "odul", req.body.id) : null;
+  const oduller = await adminOdulKaydet(t, pool, req.body);
+  const yeni = req.body.id ? await yonetimVarliginiGetir(t, "odul", req.body.id) : [...oduller].filter((odul) => odul.ad === String(req.body.ad || "").trim() && Number(odul.urunId) === Number(req.body.urunId)).sort((a, b) => Number(b.id) - Number(a.id))[0];
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "odul", varlikId: yeni?.id, islem: eski ? "guncelleme" : "ekleme", aciklama: `${req.body.ad || "Ödül"} puan marketinde ${eski ? "güncellendi" : "oluşturuldu"}.`, eskiDeger: eski, yeniDeger: yeni });
+  io.to(oda(t, "genel")).emit("oduller-guncellendi");
+  return { oduller };
+}));
+app.delete("/api/admin/oduller/:id", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const eski = await yonetimVarliginiGetir(t, "odul", req.params.id);
+  await adminOdulArsivle(t, pool, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "odul", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Ödül"} puan marketinden arşivlendi.`, eskiDeger: eski });
+  io.to(oda(t, "genel")).emit("oduller-guncellendi");
+}));
 
 app.get("/", (req, res) => res.send("Burger Plus backend calisiyor (PostgreSQL)"));
 
@@ -517,20 +588,22 @@ app.get("/saglik", (req, res) => res.json({ durum: "calisiyor", zaman: new Date(
 
 async function onaylananOdemeyiMutfagaAktar(odeme) {
   if (odeme.mutfagaAktarildi) return;
+  const tenantId = Number(odeme.isletmeId);
+  if (!Number.isSafeInteger(tenantId) || tenantId < 1) throw new Error("Ödemeye ait işletme bilgisi geçersiz.");
   const masaNo = odeme.masaNo || "algotur";
-  await masaSirayaAl(masaNo, async () => {
+  await masaSirayaAl(tenantId, masaNo, async () => {
     for (const [kalemNo, urun] of odeme.urunler.entries()) {
       await kalemEkle(
-        masaNo, urun, odeme.kisiAdi, urun.secimler, urun.haricMalzemeler,
+        tenantId, masaNo, urun, odeme.kisiAdi, urun.secimler, urun.haricMalzemeler,
         odeme.siparisNo, odeme.id, kalemNo
       );
     }
-    await odemeMutfagaAktarildi(odeme.id);
-    const tumMasalar = await tumAcikMasalar();
-    io.to(`masa-${masaNo}`).emit("masa-guncellendi", await masaSiparisleriniGetir(masaNo));
-    io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
-    io.to("salon").emit("salon-guncellendi", tumMasalar);
-    io.to("yonetim").emit("yonetim-satis-guncellendi", {
+    await odemeMutfagaAktarildi(tenantId, odeme.id);
+    const tumMasalar = await tumAcikMasalar(tenantId);
+    io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-guncellendi", await masaSiparisleriniGetir(tenantId, masaNo));
+    io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
+    io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
+    io.to(oda(tenantId, "yonetim")).emit("yonetim-satis-guncellendi", {
       siparisNo: odeme.siparisNo,
       masaNo: odeme.masaNo || "Al Götür",
       kisiAdi: odeme.kisiAdi,
@@ -548,8 +621,8 @@ async function onaylananOdemeyiMutfagaAktar(odeme) {
 // değiştirme ve masa kapatma olayları birbirini geçip eski ekran verisini
 // yeniden yayınlayamaz.
 const masaKuyruklari = new Map();
-function masaSirayaAl(masaNo, islem) {
-  const anahtar = String(masaNo);
+function masaSirayaAl(isletmeId, masaNo, islem) {
+  const anahtar = `${isletmeId}:${masaNo}`;
   const onceki = masaKuyruklari.get(anahtar) || Promise.resolve();
   const sonraki = onceki.catch(() => {}).then(islem);
   masaKuyruklari.set(anahtar, sonraki);
@@ -571,8 +644,13 @@ function socketRoluVar(socket, roller) {
 
 io.use(async (socket, sonraki) => {
   try {
+    const slug = socket.handshake.auth?.isletme || socket.handshake.query?.isletme;
+    const isletme = await isletmeSlugIleGetir(slug);
+    if (!isletme?.aktif) return sonraki(new Error("İşletme bulunamadı"));
+    socket.data.isletmeId = isletme.id;
+    socket.data.isletmeSlug = isletme.slug;
     const token = String(socket.handshake.auth?.token || "").trim();
-    socket.kullanici = token ? await tokenDogrula(token) : null;
+    socket.kullanici = token ? await tokenDogrula(token, isletme.id) : null;
     if (token && !socket.kullanici) return sonraki(new Error("Oturum gecersiz."));
     sonraki();
   } catch {
@@ -582,30 +660,33 @@ io.use(async (socket, sonraki) => {
 
 io.on("connection", (socket) => {
   console.log("Baglandi:", socket.id);
+  socket.join(oda(socket.data.isletmeId, "genel"));
 
   socket.on("masaya-katil", async (gelenMasaNo) => {
+    const tenantId = socket.data.isletmeId;
     const masaNo = guvenliMasaNo(gelenMasaNo);
     if (!masaNo) return;
-    socket.join(`masa-${masaNo}`);
-    socket.emit("masa-guncellendi", await masaSiparisleriniGetir(masaNo));
-    console.log(`${socket.id} -> masa-${masaNo}`);
+    socket.join(oda(tenantId, `masa-${masaNo}`));
+    socket.emit("masa-guncellendi", await masaSiparisleriniGetir(tenantId, masaNo));
+    console.log(`${socket.id} -> ${oda(tenantId, `masa-${masaNo}`)}`);
   });
 
   socket.on("urun-ekle", ({ masaNo, urun, kisiAdi, secimler, haricMalzemeler, siparisNo }, tamamlandi) => {
+    const tenantId = socket.data.isletmeId;
     masaNo = guvenliMasaNo(masaNo);
     if (!masaNo || process.env.LEGACY_SOCKET_SIPARIS_AKTIF !== "true" || !socketRoluVar(socket, ["mutfak", "salon", "kasiyer"])) {
       if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: "Bu siparis yolu kullanima kapali." });
       return;
     }
-    masaSirayaAl(masaNo, async () => {
+    masaSirayaAl(tenantId, masaNo, async () => {
       const guncel = await kalemEkle(
-        masaNo, urun, kisiAdi, secimler || urun?.secimler || {},
+        tenantId, masaNo, urun, kisiAdi, secimler || urun?.secimler || {},
         haricMalzemeler || urun?.haricMalzemeler || [], siparisNo
       );
-      io.to(`masa-${masaNo}`).emit("masa-guncellendi", guncel);
-      const tumMasalar = await tumAcikMasalar();
-      io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
-      io.to("salon").emit("salon-guncellendi", tumMasalar);
+      io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-guncellendi", guncel);
+      const tumMasalar = await tumAcikMasalar(tenantId);
+      io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
+      io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
     }).catch((e) => {
       console.error("Ürün ekleme hatası:", e.message);
@@ -615,39 +696,43 @@ io.on("connection", (socket) => {
 
   socket.on("mutfaga-katil", async () => {
     if (!socketRoluVar(socket, ["mutfak"])) return;
-    socket.join("mutfak");
-    socket.emit("mutfak-guncellendi", await tumAcikMasalar());
-    console.log(`${socket.id} -> mutfak`);
+    const tenantId = socket.data.isletmeId;
+    socket.join(oda(tenantId, "mutfak"));
+    socket.emit("mutfak-guncellendi", await tumAcikMasalar(tenantId));
+    console.log(`${socket.id} -> ${oda(tenantId, "mutfak")}`);
   });
 
   // Salon personeli odasi (garson/kasiyer). Tum acik masalari gorur.
   socket.on("salona-katil", async () => {
     if (!socketRoluVar(socket, ["salon", "kasiyer"])) return;
-    socket.join("salon");
-    socket.emit("salon-guncellendi", await tumAcikMasalar());
-    console.log(`${socket.id} -> salon`);
+    const tenantId = socket.data.isletmeId;
+    socket.join(oda(tenantId, "salon"));
+    socket.emit("salon-guncellendi", await tumAcikMasalar(tenantId));
+    console.log(`${socket.id} -> ${oda(tenantId, "salon")}`);
   });
 
   socket.on("yonetime-katil", async () => {
     if (!socketRoluVar(socket, [])) return;
-    socket.join("yonetim");
-    socket.emit("yonetim-satislar", await canliSatislariGetir({ limit: 50 }));
+    const tenantId = socket.data.isletmeId;
+    socket.join(oda(tenantId, "yonetim"));
+    socket.emit("yonetim-satislar", await canliSatislariGetir(tenantId, { limit: 50 }));
   });
 
   socket.on("masa-durum-degistir", ({ masaNo, siparisNo, durum }, tamamlandi) => {
+    const tenantId = socket.data.isletmeId;
     masaNo = guvenliMasaNo(masaNo);
     if (!masaNo || !socketRoluVar(socket, ["mutfak"])) {
       if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: "Yetkisiz islem." });
       return;
     }
-    masaSirayaAl(masaNo, async () => {
-      const guncel = await masaDurumGuncelle(masaNo, durum, socket.kullanici?.id, siparisNo);
+    masaSirayaAl(tenantId, masaNo, async () => {
+      const guncel = await masaDurumGuncelle(tenantId, masaNo, durum, socket.kullanici?.id, siparisNo);
       if (guncel) {
-        io.to(`masa-${masaNo}`).emit("masa-guncellendi", guncel);
-        const tumMasalar = await tumAcikMasalar();
-        io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
-        io.to("salon").emit("salon-guncellendi", tumMasalar);
-        io.to("yonetim").emit("yonetim-operasyon-guncellendi", { masaNo, siparisNo, durum, zaman: new Date().toISOString() });
+        io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-guncellendi", guncel);
+        const tumMasalar = await tumAcikMasalar(tenantId);
+        io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
+        io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
+        io.to(oda(tenantId, "yonetim")).emit("yonetim-operasyon-guncellendi", { masaNo, siparisNo, durum, zaman: new Date().toISOString() });
       }
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
     }).catch((e) => {
@@ -658,19 +743,20 @@ io.on("connection", (socket) => {
 
   // Salon: masayi kapat (musteriler kalkinca). Oturum kapanir, yeni gelen temiz baslar.
   socket.on("masa-kapat", (gelenMasaNo, tamamlandi) => {
+    const tenantId = socket.data.isletmeId;
     const masaNo = guvenliMasaNo(gelenMasaNo);
     if (!masaNo || !socketRoluVar(socket, ["salon", "kasiyer"])) {
       if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: "Yetkisiz islem." });
       return;
     }
-    masaSirayaAl(masaNo, async () => {
-      const bos = await masaKapat(masaNo, socket.kullanici?.id);
-      io.to(`masa-${masaNo}`).emit("masa-guncellendi", bos);
-      io.to(`masa-${masaNo}`).emit("masa-kapandi", { masaNo });
-      const tumMasalar = await tumAcikMasalar();
-      io.to("mutfak").emit("mutfak-guncellendi", tumMasalar);
-      io.to("salon").emit("salon-guncellendi", tumMasalar);
-      io.to("yonetim").emit("yonetim-operasyon-guncellendi", { masaNo, durum: "kapali", zaman: new Date().toISOString() });
+    masaSirayaAl(tenantId, masaNo, async () => {
+      const bos = await masaKapat(tenantId, masaNo, socket.kullanici?.id);
+      io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-guncellendi", bos);
+      io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-kapandi", { masaNo });
+      const tumMasalar = await tumAcikMasalar(tenantId);
+      io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
+      io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
+      io.to(oda(tenantId, "yonetim")).emit("yonetim-operasyon-guncellendi", { masaNo, durum: "kapali", zaman: new Date().toISOString() });
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
       console.log(`Masa ${masaNo} kapatildi`);
     }).catch((e) => {
@@ -701,9 +787,15 @@ const PORT = process.env.PORT || 4000;
 
 // Once tablolari hazirla, sonra sunucuyu baslat.
 // 0.0.0.0: bulut ortamlarinda (Render vb.) disaridan erisim icin gerekli.
-tablolariHazirla()
-  .then(() => adminTablolariHazirla())
-  .then(() => sadakatTablolariHazirla(pool))
+let varsayilanIsletmeId;
+isletmeTablosunuHazirla()
+  .then((isletme) => {
+    varsayilanIsletmeId = isletme.id;
+    return tablolariHazirla(varsayilanIsletmeId);
+  })
+  .then(() => adminTablolariHazirla(varsayilanIsletmeId))
+  .then(() => sadakatTablolariHazirla(varsayilanIsletmeId, pool))
+  .then(() => isletmeMigrationunuCalistir())
   .then(() => {
     httpServer.listen(PORT, "0.0.0.0", () => {
       console.log(`Burger Plus backend calisiyor -> port ${PORT}`);

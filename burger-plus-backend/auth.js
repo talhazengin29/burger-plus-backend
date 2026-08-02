@@ -39,13 +39,20 @@ if (!URETIM && !process.env.JWT_SECRET) {
 }
 const TOKEN_SURESI = "7d"; // token 7 gun gecerli
 
+function isletmeIdZorunlu(isletmeId) {
+  const id = Number(isletmeId);
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error("isletmeId zorunlu");
+  return id;
+}
+
 // Basit e-posta bicim kontrolu
 function emailGecerli(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
 // --- Kayit ---
-export async function kayitOl(veri) {
+export async function kayitOl(isletmeId, veri) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
   const ad = String(veri?.ad || "").trim().slice(0, 60);
   const soyad = String(veri?.soyad || "").trim().slice(0, 60);
   const cinsiyet = String(veri?.cinsiyet || "").trim().slice(0, 20);
@@ -70,12 +77,12 @@ export async function kayitOl(veri) {
   }
 
   // E-posta zaten kayitli mi?
-  const mevcut = await kullaniciBulEmail(email);
+  const mevcut = await kullaniciBulEmail(tenantId, email);
   if (mevcut) {
     return { hata: "Bu e-posta zaten kayıtlı." };
   }
 
-  const davetEden = davetKodu ? await davetKoduylaKullaniciBul(davetKodu) : null;
+  const davetEden = davetKodu ? await davetKoduylaKullaniciBul(tenantId, davetKodu) : null;
   if (davetKodu && !davetEden) return { hata: "Davet kodu bulunamadı." };
 
   // Sifreyi hash'le (10 tur salt — senior standart)
@@ -83,7 +90,7 @@ export async function kayitOl(veri) {
 
   let kullanici;
   try {
-    kullanici = await kullaniciOlustur({
+    kullanici = await kullaniciOlustur(tenantId, {
       ad, soyad, cinsiyet, email, telefon, sifreHash, davetEdenId: davetEden?.id || null,
     });
   } catch (e) {
@@ -91,19 +98,20 @@ export async function kayitOl(veri) {
     throw e;
   }
 
-  const token = tokenUret(kullanici.id);
+  const token = tokenUret(kullanici.id, tenantId);
   return { kullanici, token };
 }
 
 // --- Giris ---
-export async function girisYap({ email, sifre } = {}) {
+export async function girisYap(isletmeId, { email, sifre } = {}) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
   email = String(email || "").trim().toLowerCase().slice(0, 254);
   sifre = String(sifre || "");
   if (!email || !sifre) {
     return { hata: "E-posta ve şifre gerekli." };
   }
 
-  const kullanici = await kullaniciBulEmail(email);
+  const kullanici = await kullaniciBulEmail(tenantId, email);
   if (!kullanici) {
     return { hata: "E-posta veya şifre hatalı." };
   }
@@ -115,89 +123,97 @@ export async function girisYap({ email, sifre } = {}) {
 
   if (kullanici.iki_faktor_aktif) {
     const ikiFaktorToken = jwt.sign(
-      { id: kullanici.id, amac: "iki-faktor-giris" },
+      { id: kullanici.id, isletmeId: tenantId, amac: "iki-faktor-giris" },
       JWT_SECRET,
       { expiresIn: "5m" }
     );
     return { ikiFaktorGerekli: true, ikiFaktorToken };
   }
 
-  const guvenli = await kullaniciBulId(kullanici.id);
-  const token = tokenUret(kullanici.id);
+  const guvenli = await kullaniciBulId(tenantId, kullanici.id);
+  const token = tokenUret(kullanici.id, tenantId);
   return { kullanici: guvenli, token };
 }
 
-async function ikinciFaktoruDogrula(kullaniciId, kayit, kod) {
+async function ikinciFaktoruDogrula(isletmeId, kullaniciId, kayit, kod) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
   if (!kayit?.iki_faktor_aktif || !kayit.iki_faktor_sir) return false;
   if (kurtarmaKoduBicimindeMi(kod)) {
-    return ikiFaktorKurtarmaKoduKullan(kullaniciId, kurtarmaKoduHashle(kod));
+    return ikiFaktorKurtarmaKoduKullan(tenantId, kullaniciId, kurtarmaKoduHashle(kod));
   }
   return ikiFaktorKoduGecerliMi(ikiFaktorSirriCoz(kayit.iki_faktor_sir), kod);
 }
 
-export async function ikiFaktorGirisiniTamamla(ikiFaktorToken, kod) {
+export async function ikiFaktorGirisiniTamamla(isletmeId, ikiFaktorToken, kod) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
   let cozulmus;
   try {
     cozulmus = jwt.verify(String(ikiFaktorToken || ""), JWT_SECRET);
   } catch {
     return { hata: "İki adımlı doğrulama oturumunun süresi doldu. Yeniden giriş yapın." };
   }
-  if (cozulmus.amac !== "iki-faktor-giris" || !cozulmus.id) {
+  if (cozulmus.amac !== "iki-faktor-giris" || !cozulmus.id || Number(cozulmus.isletmeId) !== tenantId) {
     return { hata: "İki adımlı doğrulama oturumu geçersiz." };
   }
-  const kayit = await ikiFaktorKaydiniGetir(cozulmus.id);
-  if (!await ikinciFaktoruDogrula(cozulmus.id, kayit, kod)) {
+  const kayit = await ikiFaktorKaydiniGetir(tenantId, cozulmus.id);
+  if (!await ikinciFaktoruDogrula(tenantId, cozulmus.id, kayit, kod)) {
     return { hata: "Doğrulama kodu veya kurtarma kodu geçersiz." };
   }
-  const kullanici = await kullaniciBulId(cozulmus.id);
-  return { kullanici, token: tokenUret(cozulmus.id) };
+  const kullanici = await kullaniciBulId(tenantId, cozulmus.id);
+  return { kullanici, token: tokenUret(cozulmus.id, tenantId) };
 }
 
-export async function ikiFaktorKurulumBaslat(kullaniciId, mevcutSifre) {
-  const kayit = await ikiFaktorKaydiniGetir(kullaniciId);
+export async function ikiFaktorKurulumBaslat(isletmeId, kullaniciId, mevcutSifre) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const kayit = await ikiFaktorKaydiniGetir(tenantId, kullaniciId);
   if (!kayit || !await bcrypt.compare(String(mevcutSifre || ""), kayit.sifre_hash)) {
     return { hata: "Mevcut şifreniz hatalı." };
   }
   if (kayit.iki_faktor_aktif) return { hata: "İki adımlı doğrulama zaten aktif." };
   const secret = ikiFaktorSirriUret();
-  await ikiFaktorBekleyeniKaydet(kullaniciId, ikiFaktorSirriSifrele(secret));
+  await ikiFaktorBekleyeniKaydet(tenantId, kullaniciId, ikiFaktorSirriSifrele(secret));
   return { secret, otpauthUri: ikiFaktorUriUret(secret, kayit.email) };
 }
 
-export async function ikiFaktorKurulumOnayla(kullaniciId, kod) {
-  const kayit = await ikiFaktorKaydiniGetir(kullaniciId);
+export async function ikiFaktorKurulumOnayla(isletmeId, kullaniciId, kod) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const kayit = await ikiFaktorKaydiniGetir(tenantId, kullaniciId);
   if (!kayit?.iki_faktor_bekleyen_sir) return { hata: "Önce iki adımlı doğrulama kurulumunu başlatın." };
   const secret = ikiFaktorSirriCoz(kayit.iki_faktor_bekleyen_sir);
   if (!await ikiFaktorKoduGecerliMi(secret, kod)) return { hata: "Authenticator kodu geçersiz." };
   const kurtarmaKodlari = kurtarmaKodlariUret();
-  const etkinlesti = await ikiFaktorEtkinlestir(kullaniciId, kurtarmaKodlari.map(kurtarmaKoduHashle));
+  const etkinlesti = await ikiFaktorEtkinlestir(tenantId, kullaniciId, kurtarmaKodlari.map(kurtarmaKoduHashle));
   if (!etkinlesti) return { hata: "İki adımlı doğrulama etkinleştirilemedi." };
   return { basarili: true, kurtarmaKodlari };
 }
 
-export async function ikiFaktorDevreDisiBirak(kullaniciId, mevcutSifre, kod) {
-  const kayit = await ikiFaktorKaydiniGetir(kullaniciId);
+export async function ikiFaktorDevreDisiBirak(isletmeId, kullaniciId, mevcutSifre, kod) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const kayit = await ikiFaktorKaydiniGetir(tenantId, kullaniciId);
   if (!kayit?.iki_faktor_aktif) return { hata: "İki adımlı doğrulama zaten kapalı." };
   if (!await bcrypt.compare(String(mevcutSifre || ""), kayit.sifre_hash)) {
     return { hata: "Mevcut şifreniz hatalı." };
   }
-  if (!await ikinciFaktoruDogrula(kullaniciId, kayit, kod)) {
+  if (!await ikinciFaktoruDogrula(tenantId, kullaniciId, kayit, kod)) {
     return { hata: "Doğrulama kodu veya kurtarma kodu geçersiz." };
   }
-  await ikiFaktorKapat(kullaniciId);
+  await ikiFaktorKapat(tenantId, kullaniciId);
   return { basarili: true };
 }
 
 // --- Token uret / dogrula ---
-function tokenUret(kullaniciId) {
-  return jwt.sign({ id: kullaniciId }, JWT_SECRET, { expiresIn: TOKEN_SURESI });
+function tokenUret(kullaniciId, isletmeId) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  return jwt.sign({ id: kullaniciId, isletmeId: tenantId }, JWT_SECRET, { expiresIn: TOKEN_SURESI });
 }
 
 // Token'i dogrular, gecerliyse guncel kullanici bilgisini dondurur.
-export async function tokenDogrula(token) {
+export async function tokenDogrula(token, beklenenIsletmeId = null) {
   try {
     const cozulmus = jwt.verify(token, JWT_SECRET);
-    const kullanici = await kullaniciBulId(cozulmus.id);
+    const tenantId = isletmeIdZorunlu(cozulmus.isletmeId);
+    if (beklenenIsletmeId != null && tenantId !== isletmeIdZorunlu(beklenenIsletmeId)) return null;
+    const kullanici = await kullaniciBulId(tenantId, cozulmus.id);
     if (!kullanici) return null; // silinmis kullanici
     // Sifre degistirildiyse, degisiklikten once uretilmis token'lar artik gecersizdir.
     if (kullanici.sifreDegisimTarihi && cozulmus.iat * 1000 < new Date(kullanici.sifreDegisimTarihi).getTime()) {
@@ -209,6 +225,18 @@ export async function tokenDogrula(token) {
   }
 }
 
+function istekTokeniniCoz(token) {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
+function tokenIsletmesiUyusuyorMu(cozulmus, req) {
+  return Number(cozulmus?.isletmeId) === Number(req.isletme?.id);
+}
+
 // Express middleware: gecerli token olmadan gecmeyi engeller.
 export function korumaliMiddleware() {
   return async (req, res, next) => {
@@ -216,7 +244,11 @@ export function korumaliMiddleware() {
     const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
     if (!token) return res.status(401).json({ hata: "Giriş gerekli." });
 
-    const kullanici = await tokenDogrula(token);
+    const cozulmus = istekTokeniniCoz(token);
+    if (cozulmus && !tokenIsletmesiUyusuyorMu(cozulmus, req)) {
+      return res.status(403).json({ hata: "Bu oturum başka bir işletmeye ait." });
+    }
+    const kullanici = await tokenDogrula(token, req.isletme?.id);
     if (!kullanici) return res.status(401).json({ hata: "Oturum geçersiz." });
 
     req.kullanici = kullanici;
@@ -227,10 +259,16 @@ export function korumaliMiddleware() {
 // Misafir ödeme akışını destekler; token varsa kullanıcıyı ekler, yoksa isteği
 // engellemez. Ödeme tutarı ve sipariş içeriği yine backend tarafından doğrulanır.
 export function opsiyonelKullaniciMiddleware() {
-  return async (req, _res, next) => {
+  return async (req, res, next) => {
     const baslik = req.headers.authorization || "";
     const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
-    if (token) req.kullanici = await tokenDogrula(token);
+    if (token) {
+      const cozulmus = istekTokeniniCoz(token);
+      if (cozulmus && !tokenIsletmesiUyusuyorMu(cozulmus, req)) {
+        return res.status(403).json({ hata: "Bu oturum başka bir işletmeye ait." });
+      }
+      req.kullanici = await tokenDogrula(token, req.isletme?.id);
+    }
     next();
   };
 }
@@ -242,7 +280,11 @@ export function adminMiddleware() {
     const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
     if (!token) return res.status(401).json({ hata: "Yönetici girişi gerekli." });
 
-    const kullanici = await tokenDogrula(token);
+    const cozulmus = istekTokeniniCoz(token);
+    if (cozulmus && !tokenIsletmesiUyusuyorMu(cozulmus, req)) {
+      return res.status(403).json({ hata: "Bu oturum başka bir işletmeye ait." });
+    }
+    const kullanici = await tokenDogrula(token, req.isletme?.id);
     if (!kullanici || kullanici.rol !== "admin") {
       return res.status(403).json({ hata: "Bu işlem için yönetici yetkisi gerekli." });
     }
@@ -258,7 +300,11 @@ export function rolMiddleware(izinliRoller = []) {
     const baslik = req.headers.authorization || "";
     const token = baslik.startsWith("Bearer ") ? baslik.slice(7) : null;
     if (!token) return res.status(401).json({ hata: "Giris gerekli." });
-    const kullanici = await tokenDogrula(token);
+    const cozulmus = istekTokeniniCoz(token);
+    if (cozulmus && !tokenIsletmesiUyusuyorMu(cozulmus, req)) {
+      return res.status(403).json({ hata: "Bu oturum başka bir işletmeye ait." });
+    }
+    const kullanici = await tokenDogrula(token, req.isletme?.id);
     if (!kullanici) return res.status(401).json({ hata: "Oturum gecersiz." });
     if (!roller.has(kullanici.rol) && kullanici.rol !== "admin") {
       return res.status(403).json({ hata: "Bu islem icin yetkiniz yok." });
@@ -277,17 +323,19 @@ function tokenHashla(token) {
 
 // Kullanici var/yok bilgisi disari sizdirilmaz: bu fonksiyon her zaman
 // sessizce doner, cagiran route her durumda ayni mesaji yanitlar.
-export async function sifirlamaTalepEt(email) {
+export async function sifirlamaTalepEt(isletmeId, isletmeSlug, email) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
   const temizEmail = String(email || "").trim().toLowerCase().slice(0, 254);
   if (!emailGecerli(temizEmail)) return;
-  const kullanici = await kullaniciBulEmail(temizEmail);
+  const kullanici = await kullaniciBulEmail(tenantId, temizEmail);
   if (!kullanici) return;
 
   try {
     const duzToken = randomBytes(32).toString("hex");
-    await sifreSifirlamaTalebiOlustur(kullanici.id, tokenHashla(duzToken), SIFIRLAMA_SURESI_DK);
+    await sifreSifirlamaTalebiOlustur(tenantId, kullanici.id, tokenHashla(duzToken), SIFIRLAMA_SURESI_DK);
     const frontendUrl = String(process.env.FRONTEND_URL || "").trim().replace(/\/$/, "");
-    const link = `${frontendUrl}/sifre-sifirla?token=${duzToken}`;
+    const slug = encodeURIComponent(String(isletmeSlug || "").trim().toLowerCase());
+    const link = `${frontendUrl}/${slug}/sifre-sifirla?token=${duzToken}`;
     await sifirlamaEpostasiGonder(kullanici.email, kullanici.ad, link);
   } catch (e) {
     // Saglayici/e-posta hatasi disariya sizdirilmaz, yalnizca sunucu loguna yazilir.
@@ -295,13 +343,15 @@ export async function sifirlamaTalepEt(email) {
   }
 }
 
-export async function sifirlamaTokenGecerliMi(token) {
+export async function sifirlamaTokenGecerliMi(isletmeId, token) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
   const temiz = String(token || "").trim();
   if (!temiz) return false;
-  return sifreSifirlamaTokeniGecerliMi(tokenHashla(temiz));
+  return sifreSifirlamaTokeniGecerliMi(tenantId, tokenHashla(temiz));
 }
 
-export async function sifreyiSifirla(token, yeniSifre) {
+export async function sifreyiSifirla(isletmeId, token, yeniSifre) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
   const temizToken = String(token || "").trim();
   const sifre = String(yeniSifre || "");
   if (!temizToken) return { hata: "Bağlantı geçersiz veya süresi dolmuş." };
@@ -309,7 +359,7 @@ export async function sifreyiSifirla(token, yeniSifre) {
   if (sifre.length > 72) return { hata: "Şifre en fazla 72 karakter olabilir." };
 
   const sifreHash = await bcrypt.hash(sifre, 10);
-  const sonuc = await sifreyiSifirlaDb(tokenHashla(temizToken), sifreHash);
+  const sonuc = await sifreyiSifirlaDb(tenantId, tokenHashla(temizToken), sifreHash);
   if (sonuc.gecersiz) return { hata: "Bağlantı geçersiz veya süresi dolmuş." };
   return { basarili: true };
 }

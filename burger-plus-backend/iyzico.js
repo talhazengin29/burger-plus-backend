@@ -136,8 +136,9 @@ export async function iyzicoSonucuGetir(odeme, token) {
   return sonuc;
 }
 
-export function iyzicoDonusAdresi(odemeId) {
+export function iyzicoDonusAdresi(isletmeSlug, odemeId) {
   const frontendUrl = mutlakTemelUrl(ortamDegeri("FRONTEND_URL"), "FRONTEND_URL");
   if (!frontendUrl) return "/";
-  return `${frontendUrl}/odeme-basarili?odeme=${encodeURIComponent(odemeId)}`;
+  const slug = encodeURIComponent(String(isletmeSlug || "").trim().toLowerCase());
+  return `${frontendUrl}/${slug}/odeme-sonuc?odeme=${encodeURIComponent(odemeId)}`;
 }
