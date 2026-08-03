@@ -92,6 +92,7 @@ import {
   superIsletmeSilmeOzeti, superIsletmeyiYumusakSil, platformOzetiniGetir,
   ciroRaporunuGetir, buyumeRaporunuGetir, siparisRaporunuGetir, kullaniciRaporunuGetir,
   abonelikleriGetir, abonelikOlustur, abonelikGuncelle, gelirRaporunuGetir,
+  isletmeAdminleriniGetir, isletmeAdminHesabiniAyarla,
 } from "./superAdminDb.js";
 import { sablonuGetir, slugOlustur } from "./sablonlar.js";
 import { isletmeKurulumunuYap, slugMusaitlikDurumu } from "./kurulumDb.js";
@@ -666,6 +667,20 @@ app.delete("/api/super/isletmeler/:id", superAdmin, async (req, res) => {
     res.status(400).json({ hata: hata.message });
   }
 });
+
+// İşletmenin yönetici hesabı: super admin e-posta ve şifreyi belirler,
+// işletme sahibi bu bilgilerle kendi paneline girer.
+app.get("/api/super/isletmeler/:id/admin", superAdmin, guvenli(async (req) => ({
+  adminler: await isletmeAdminleriniGetir(req.params.id),
+})));
+app.post("/api/super/isletmeler/:id/admin", superAdmin, guvenli(async (req, res) => {
+  const sonuc = await isletmeAdminHesabiniAyarla(req.params.id, req.body || {});
+  res.locals.hedefIsletmeId = Number(req.params.id);
+  res.locals.denetimIslemi = sonuc.olusturuldu ? "isletme-admin-olusturma" : "isletme-admin-sifre-yenileme";
+  // Şifre denetim günlüğüne yazılmaz; denetimIcinTemizle zaten maskeliyor.
+  res.locals.denetimDetay = { adminEmail: sonuc.admin.email };
+  return sonuc;
+}));
 
 app.get("/api/super/ozet", superAdmin, guvenli(() => platformOzetiniGetir()));
 app.get("/api/super/rapor/ciro", superAdmin, guvenli((req) => ciroRaporunuGetir(req.query.gun, req.query.baslangic, req.query.bitis)));

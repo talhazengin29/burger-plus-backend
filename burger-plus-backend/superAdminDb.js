@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import pool from "./db.js";
+import pool, { davetKoduUret } from "./db.js";
 
 const PLANLAR = new Set(["baslangic", "profesyonel", "kurumsal"]);
 const ABONELIK_DURUMLARI = new Set(["aktif", "askida", "iptal", "deneme"]);
@@ -222,6 +222,110 @@ export async function superIsletmeleriGetir() {
 export async function superIsletmeDetayiGetir(id, veritabani = pool) {
   const sonuc = await veritabani.query(`${ISLETME_METRIK_SQL} WHERE i.id=$1`, [idDogrula(id, "isletmeId")]);
   return isletmeDonustur(sonuc.rows[0]);
+}
+
+// ============================================================================
+// İşletme yönetici hesabı
+//
+// Kurulum sihirbazı zaten bir admin hesabı açıyor (kurulumDb.js). Bu uçlar,
+// sihirbaz dışında oluşturulmuş işletmelere yönetici tanımlamak veya mevcut
+// yöneticinin şifresini sıfırlamak içindir. Şifreyi yalnızca super admin
+// belirler; işletme sahibine bu bilgilerle giriş yapması söylenir.
+// ============================================================================
+
+function adminDonustur(satir) {
+  return {
+    id: Number(satir.id),
+    ad: satir.ad,
+    soyad: satir.soyad,
+    email: satir.email,
+    ikiFaktorAktif: satir.iki_faktor_aktif === true,
+    olusturma: satir.olusturma,
+    sifreDegisimTarihi: satir.sifre_degisim_tarihi,
+  };
+}
+
+export async function isletmeAdminleriniGetir(isletmeId, veritabani = pool) {
+  const id = idDogrula(isletmeId, "isletmeId");
+  const sonuc = await veritabani.query(
+    `SELECT id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi
+       FROM kullanicilar
+      WHERE isletme_id=$1 AND rol='admin'
+      ORDER BY id`,
+    [id]
+  );
+  return sonuc.rows.map(adminDonustur);
+}
+
+export async function isletmeAdminHesabiniAyarla(isletmeId, veri = {}) {
+  const id = idDogrula(isletmeId, "isletmeId");
+  const isletme = await pool.query("SELECT id FROM isletmeler WHERE id=$1", [id]);
+  if (!isletme.rows.length) throw new Error("İşletme bulunamadı.");
+
+  const ad = metin(veri.ad, 60);
+  const soyad = metin(veri.soyad, 60);
+  const email = metin(veri.email, 254).toLowerCase();
+  const sifre = String(veri.sifre || "");
+  if (!ad || !soyad) throw new Error("Yönetici adı ve soyadı zorunludur.");
+  if (!emailGecerli(email)) throw new Error("Yönetici e-postası geçersiz.");
+  if (sifre.length < 8 || sifre.length > 72) throw new Error("Şifre 8-72 karakter olmalıdır.");
+  if (/[\r\n\t]/.test(sifre)) throw new Error("Şifre satır sonu veya sekme içeremez.");
+
+  const sifreHash = await bcrypt.hash(sifre, 12);
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const mevcut = await baglanti.query(
+      "SELECT id,rol FROM kullanicilar WHERE isletme_id=$1 AND lower(email)=$2 FOR UPDATE",
+      [id, email]
+    );
+
+    let kullaniciId;
+    let olusturuldu;
+    // Var olan bir hesap admin'e yükseltiliyorsa arayüz bunu bildirebilsin.
+    const oncekiRol = mevcut.rows.length ? mevcut.rows[0].rol : null;
+    if (mevcut.rows.length) {
+      // Aynı e-posta bu işletmede zaten var: admin'e yükselt ve şifresini
+      // yenile. sifre_degisim_tarihi güncellendiği için o hesabın eski
+      // oturum token'ları geçersizleşir (bkz. auth.js#tokenDogrula).
+      kullaniciId = Number(mevcut.rows[0].id);
+      olusturuldu = false;
+      await baglanti.query(
+        `UPDATE kullanicilar
+            SET ad=$2, soyad=$3, sifre_hash=$4, rol='admin', sifre_degisim_tarihi=NOW()
+          WHERE id=$1`,
+        [kullaniciId, ad, soyad, sifreHash]
+      );
+    } else {
+      olusturuldu = true;
+      const eklenen = await baglanti.query(
+        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu)
+         VALUES ($1,$2,$3,$4,$5,'admin',$6) RETURNING id`,
+        [id, ad, soyad, email, sifreHash, davetKoduUret()]
+      );
+      kullaniciId = Number(eklenen.rows[0].id);
+    }
+    await baglanti.query("COMMIT");
+
+    const kayit = await pool.query(
+      `SELECT id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi
+         FROM kullanicilar WHERE id=$1`,
+      [kullaniciId]
+    );
+    return { olusturuldu, oncekiRol, admin: adminDonustur(kayit.rows[0]) };
+  } catch (hata) {
+    await baglanti.query("ROLLBACK").catch(() => {});
+    if (hata?.code === "23505") {
+      // Davet kodu çakışması e-posta hatasıyla karıştırılmasın.
+      if (String(hata.constraint || "").includes("davet_kodu")) {
+        throw new Error("Davet kodu üretilemedi, lütfen tekrar deneyin.");
+      }
+      throw new Error("Bu e-posta bu işletmede zaten kullanılıyor.");
+    }
+    throw hata;
+  } finally {
+    baglanti.release();
+  }
 }
 
 export async function superIsletmeBilgileriniGuncelle(id, veri = {}, veritabani = pool) {
