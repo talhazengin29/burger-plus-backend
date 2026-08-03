@@ -10,6 +10,7 @@ import {
   kullaniciOlustur,
   kullaniciBulEmail,
   kullaniciBulId,
+  kullaniciAdaylariniEmailIleBul,
   davetKoduylaKullaniciBul,
   sifreSifirlamaTalebiOlustur,
   sifreSifirlamaTokeniGecerliMi,
@@ -149,6 +150,33 @@ export async function girisYap(isletmeId, { email, sifre } = {}) {
   const guvenli = await kullaniciBulId(tenantId, kullanici.id);
   const token = tokenUret(kullanici.id, tenantId);
   return { kullanici: guvenli, token };
+}
+
+// Tek panelden giris: hangi isletmeye ait oldugu bilinmeden e-posta+sifre
+// dogrulanir. Ayni e-posta birden fazla isletmede kayitli olabilecegi icin
+// (db.js#kullaniciAdaylariniEmailIleBul, isletme basina unique) her adayda
+// mevcut girisYap() calistirilir; boylece 2FA/sifre-degisim-tarihi gibi tum
+// mantik tekrar yazilmadan aynen calisir. Aday hic yoksa da sabit-zamanli bir
+// bcrypt karsilastirmasi yapilir (aksi halde yanit suresi "bu e-posta hicbir
+// isletmede yok" bilgisini sizdirabilir).
+export async function girisYapGenel({ email, sifre } = {}) {
+  const temizEmail = String(email || "").trim().toLowerCase().slice(0, 254);
+  const temizSifre = String(sifre || "");
+  if (!temizEmail || !temizSifre) {
+    return { hata: "E-posta ve şifre gerekli." };
+  }
+
+  const adaylar = await kullaniciAdaylariniEmailIleBul(temizEmail);
+  if (!adaylar.length) {
+    await bcrypt.compare(temizSifre, GECERSIZ_SUPER_ADMIN_HASH);
+    return { hata: "E-posta veya şifre hatalı." };
+  }
+
+  for (const aday of adaylar) {
+    const sonuc = await girisYap(aday.isletme_id, { email: temizEmail, sifre: temizSifre });
+    if (!sonuc.hata) return { ...sonuc, isletmeSlug: aday.isletme_slug };
+  }
+  return { hata: "E-posta veya şifre hatalı." };
 }
 
 async function ikinciFaktoruDogrula(isletmeId, kullaniciId, kayit, kod) {

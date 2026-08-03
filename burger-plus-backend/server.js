@@ -69,7 +69,7 @@ import {
 import { gorselYukle, logoYukle, storageDosyasiniSil } from "./storage.js";
 import { temaCoz } from "./konseptler.js";
 import {
-  kayitOl, girisYap, korumaliMiddleware, adminMiddleware, rolMiddleware,
+  kayitOl, girisYap, girisYapGenel, korumaliMiddleware, adminMiddleware, rolMiddleware,
   opsiyonelKullaniciMiddleware, tokenDogrula,
   sifirlamaTalepEt, sifirlamaTokenGecerliMi, sifreyiSifirla,
   ikiFaktorGirisiniTamamla, ikiFaktorKurulumBaslat,
@@ -210,6 +210,15 @@ app.get("/api/isletme/:slug", async (req, res) => {
     if (!erisim) return res.status(404).json({ hata: "İşletme bulunamadı." });
   }
   res.json(temaliIsletmeYaniti(isletme));
+});
+
+// Tek panelden giris: hangi isletmeye ait oldugu X-Isletme header'i olmadan,
+// yalnizca e-posta+sifreden bulunur (bkz. auth.js#girisYapGenel). Bu yuzden
+// isletmeMiddleware'den ONCE tanimli olmali; aksi halde header zorunlu hale gelir.
+app.post("/api/giris-genel", kimlikLimiti, async (req, res) => {
+  const sonuc = await girisYapGenel(req.body);
+  if (sonuc.hata) return res.status(401).json(sonuc);
+  res.json(sonuc);
 });
 
 async function isletmeMiddleware(req, res, next) {

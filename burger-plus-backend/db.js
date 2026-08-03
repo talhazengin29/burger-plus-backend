@@ -977,6 +977,19 @@ export async function kullaniciBulEmail(isletmeId, email) {
   return sonuc.rows[0] || null;
 }
 
+// Tek panelden giris: isletme bilinmeden, TUM isletmelerde e-postayla adaylari
+// bulur (ayni e-posta farkli isletmelerde ayri hesap olabilir, bkz. isletmeDb.js
+// isletme_id+email unique index yorumu). Yalnizca aktif isletmeler dahil edilir.
+export async function kullaniciAdaylariniEmailIleBul(email) {
+  const sonuc = await pool.query(
+    `SELECT k.*, i.slug AS isletme_slug, i.ad AS isletme_ad
+     FROM kullanicilar k JOIN isletmeler i ON i.id = k.isletme_id
+     WHERE lower(k.email) = lower($1) AND i.aktif = true`,
+    [email.toLowerCase()]
+  );
+  return sonuc.rows;
+}
+
 // ID ile kullanici bul (token dogrulamasi sonrasi; sifre_hash HARIC).
 export async function kullaniciBulId(isletmeId, id) {
   const tenantId = isletmeIdZorunlu(isletmeId);
