@@ -1,3 +1,16 @@
+// Konsept varsayılan logoları.
+//
+// Kendi logosunu yüklememiş işletmelerde bu görsel kullanılır; logo yükleyen
+// işletmede hiçbir şey değişmez (bkz. temaCoz aşağıda). Dosyalar frontend'in
+// kök public klasöründe durur (burger-plus-web/apps/landing/public/gorseller),
+// yayında sitenin kökünden servis edilir: /gorseller/...
+//
+// Not: yerel geliştirmede müşteri uygulaması ayrı portta çalıştığı için bu yol
+// 404 döner ve arayüz işletme adını metin olarak gösterir (MarkaLogosu'ndaki
+// onError yedeği). Yayında sorun olmaz.
+//
+// burger'e bilerek varsayılan verilmedi: müşteri uygulaması "burger-plus"
+// için zaten paket içindeki BurgerPlusLogosu bileşenini kullanıyor.
 export const KONSEPTLER = {
   burger: {
     ad: "Burger",
@@ -22,6 +35,7 @@ export const KONSEPTLER = {
   },
   cafe: {
     ad: "Cafe",
+    varsayilanLogo: "/gorseller/konsept-cafe-logo.png",
     renkler: {
       accent: "#C8873E",
       accentGlow: "rgba(200,135,62,0.4)",
@@ -43,6 +57,7 @@ export const KONSEPTLER = {
   },
   pizza: {
     ad: "Pizza",
+    varsayilanLogo: "/gorseller/konsept-pizza-logo.png",
     renkler: {
       accent: "#E63946",
       accentGlow: "rgba(230,57,70,0.4)",
@@ -149,6 +164,8 @@ export function temaCoz(isletme) {
     metinler: { ...varsayilan.metinler, ...(ozel.metinler || {}) },
     ozelPalet: ozel.ozelPalet === true,
     konsept,
-    logoUrl: isletme?.logoUrl || isletme?.logo_url || null,
+    // Sıra önemli: işletmenin kendi yüklediği logo her zaman önce gelir,
+    // yoksa konseptin varsayılan logosuna düşülür.
+    logoUrl: isletme?.logoUrl || isletme?.logo_url || varsayilan.varsayilanLogo || null,
   };
 }
