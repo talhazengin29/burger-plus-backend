@@ -143,8 +143,9 @@ const URUN_TIPLERI = new Set(["burger", "yan_lezzet", "icecek", "menu"]);
 
 function boyutSecenekleriniDogrula(ham, urunTipi) {
   if (!["yan_lezzet", "icecek"].includes(urunTipi)) return [];
+  if (ham == null || (Array.isArray(ham) && ham.length === 0)) return []; // boyutlandırma isteğe bağlıdır: girilmezse ürün standart/tek fiyatla kalır
   if (!Array.isArray(ham) || ham.length < 2 || ham.length > 6) {
-    throw new Error("Yan lezzet ve içeceklerde en az 2, en fazla 6 boyut seçeneği olmalıdır.");
+    throw new Error("Boyut seçeneği eklemek istiyorsan en az 2, en fazla 6 boyut girmelisin.");
   }
   const kodlar = new Set();
   const secenekler = ham.map((secenek, index) => {
@@ -191,8 +192,9 @@ async function menuYapisiniDogrula(isletmeId, ham, urunTipi) {
   if (urunler.get(menu.icecekUrunId)?.urun_tipi !== "icecek") throw new Error("Menüde geçerli bir içecek seçilmelidir.");
   const yanBoyutlar = urunler.get(menu.yanLezzetUrunId).boyut_secenekleri || [];
   const icecekBoyutlar = urunler.get(menu.icecekUrunId).boyut_secenekleri || [];
-  if (!yanBoyutlar.some((boyut) => boyut.kod === menu.varsayilanYanBoyut)) throw new Error("Menünün varsayılan yan lezzet boyutu geçersiz.");
-  if (!icecekBoyutlar.some((boyut) => boyut.kod === menu.varsayilanIcecekBoyut)) throw new Error("Menünün varsayılan içecek boyutu geçersiz.");
+  // Boyutlandırma isteğe bağlı: ürünün hiç boyut seçeneği yoksa (standart ürün) varsayılan boyut eşleşmesi aranmaz.
+  if (yanBoyutlar.length && !yanBoyutlar.some((boyut) => boyut.kod === menu.varsayilanYanBoyut)) throw new Error("Menünün varsayılan yan lezzet boyutu geçersiz.");
+  if (icecekBoyutlar.length && !icecekBoyutlar.some((boyut) => boyut.kod === menu.varsayilanIcecekBoyut)) throw new Error("Menünün varsayılan içecek boyutu geçersiz.");
   return menu;
 }
 

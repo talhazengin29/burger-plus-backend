@@ -32,20 +32,6 @@ function fiyatDogrula(deger, varsayilan) {
   return Math.round(fiyat * 100) / 100;
 }
 
-// adminDb.js#urunKaydet "yan_lezzet"/"icecek" tipi ürünlerde en az 2 boyut seçeneği şartı koşar;
-// şablon ürünleri boyut tanımlamadığı için burada makul bir varsayılan üretilmezse
-// kurulum sihırbazıyla oluşan ürünler admin panelinde hiç kaydedilemez hale gelir.
-function varsayilanBoyutSecenekleri(urunTipi, temelMiktar) {
-  if (!["yan_lezzet", "icecek"].includes(urunTipi)) return null;
-  const birim = urunTipi === "icecek" ? "ml" : "gr";
-  const normal = Number.isFinite(temelMiktar) && temelMiktar > 0 ? temelMiktar : (urunTipi === "icecek" ? 300 : 250);
-  const buyuk = Math.round((normal * 1.3) / 25) * 25;
-  return [
-    { kod: "normal", etiket: "Normal Boy", miktar: normal, birim, fiyatFarki: 0, varsayilan: true },
-    { kod: "buyuk", etiket: "Büyük Boy", miktar: buyuk, birim, fiyatFarki: 15, varsayilan: false },
-  ];
-}
-
 function seciliIndeksleriDogrula(veri, urunSayisi) {
   if (veri.sablonYukle === false) return [];
   const ham = Array.isArray(veri.seciliUrunler) ? veri.seciliUrunler : [];
@@ -149,7 +135,6 @@ export async function isletmeKurulumunuYap(superAdminId, veri = {}, ip = "") {
         fiyatArtisi: urun.gramaj.ekFiyat,
         maxAdim: urun.gramaj.maxArtis,
       } : null;
-      const boyutSecenekleri = varsayilanBoyutSecenekleri(urun.urunTipi, urun.gramaj?.varsayilan);
       const sonuc = await baglanti.query(
         `INSERT INTO urunler
           (isletme_id,ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,besin_degerleri,
@@ -160,7 +145,7 @@ export async function isletmeKurulumunuYap(superAdminId, veri = {}, ip = "") {
           urun.aciklama, JSON.stringify(urun.malzemeler), JSON.stringify(urun.alerjenler),
           JSON.stringify(urun.besinDegerleri), urun.gramaj?.varsayilan ?? null,
           gramajOpsiyonu ? JSON.stringify(gramajOpsiyonu) : null, urun.urunTipi,
-          JSON.stringify(boyutSecenekleri || []), urun.populer]
+          JSON.stringify([]), urun.populer]
       );
       urunIdleri.set(urun.ad, Number(sonuc.rows[0].id));
     }

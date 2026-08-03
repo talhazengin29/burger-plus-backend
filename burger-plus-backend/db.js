@@ -526,6 +526,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     let boyutFiyati = 0;
     const boyutSec = (kaynak, istenenKod, varsayilanKod, alan) => {
       const secenekler = Array.isArray(kaynak?.boyut_secenekleri) ? kaynak.boyut_secenekleri : [];
+      if (!secenekler.length) return {}; // boyutlandırma tanımlı değil: ürün standart/tek fiyatla satılır
       const varsayilanIndex = Math.max(0, secenekler.findIndex((secenek) => secenek.kod === varsayilanKod || (!varsayilanKod && secenek.varsayilan)));
       const secilenIndex = secenekler.findIndex((secenek) => secenek.kod === (istenenKod || secenekler[varsayilanIndex]?.kod));
       if (secilenIndex < varsayilanIndex || secilenIndex < 0) throw new Error(`${kaynak?.ad || urun.ad} boyut seçimi geçersiz.`);
