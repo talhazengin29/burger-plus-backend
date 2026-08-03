@@ -454,7 +454,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
   if (!idler.length) throw new Error("Ürün bilgisi geçersiz.");
 
   const sonuc = await pool.query(
-    `SELECT id,ad,fiyat,kategori,malzemeler,temel_miktar,gramaj_opsiyonu,urun_tipi,
+    `SELECT id,ad,fiyat,kategori,gorsel,malzemeler,temel_miktar,gramaj_opsiyonu,urun_tipi,
             boyut_secenekleri,menu_yapisi,aktif
      FROM urunler WHERE isletme_id=$1 AND id = ANY($2::int[]) AND arsivli=false`,
     [tenantId, idler]
@@ -577,6 +577,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
       id: Number(urun.id),
       ad: urun.ad,
       kategori: urun.kategori,
+      gorsel: urun.gorsel || null,
       adet,
       fiyat: indirimliFiyat + gramajFiyat + boyutFiyati,
       orijinalFiyat: kampanya ? temelFiyat + gramajFiyat + boyutFiyati : null,
