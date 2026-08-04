@@ -292,15 +292,15 @@ export async function isletmeAdminHesabiniAyarla(isletmeId, veri = {}) {
       olusturuldu = false;
       await baglanti.query(
         `UPDATE kullanicilar
-            SET ad=$2, soyad=$3, sifre_hash=$4, rol='admin', sifre_degisim_tarihi=NOW()
+            SET ad=$2, soyad=$3, sifre_hash=$4, rol='admin', sifre_degisim_tarihi=NOW(), sifre_degistirmeli=true
           WHERE id=$1`,
         [kullaniciId, ad, soyad, sifreHash]
       );
     } else {
       olusturuldu = true;
       const eklenen = await baglanti.query(
-        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu)
-         VALUES ($1,$2,$3,$4,$5,'admin',$6) RETURNING id`,
+        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli)
+         VALUES ($1,$2,$3,$4,$5,'admin',$6,true) RETURNING id`,
         [id, ad, soyad, email, sifreHash, davetKoduUret()]
       );
       kullaniciId = Number(eklenen.rows[0].id);

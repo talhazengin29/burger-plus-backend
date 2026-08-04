@@ -15,6 +15,7 @@ import {
   sifreSifirlamaTalebiOlustur,
   sifreSifirlamaTokeniGecerliMi,
   sifreyiSifirla as sifreyiSifirlaDb,
+  ilkGirisSifresiniGuncelle,
   ikiFaktorKaydiniGetir,
   ikiFaktorBekleyeniKaydet,
   ikiFaktorEtkinlestir,
@@ -43,7 +44,7 @@ if (!URETIM && !process.env.JWT_SECRET) {
   console.warn("UYARI: Yerel JWT_SECRET kullaniliyor; canli ortamda guclu bir JWT_SECRET tanimlayin.");
 }
 const TOKEN_SURESI = "7d"; // token 7 gun gecerli
-const SUPER_ADMIN_TOKEN_SURESI = "4h";
+const SUPER_ADMIN_TOKEN_SURESI = "24h";
 const GECERSIZ_SUPER_ADMIN_HASH = "$2b$12$7nAOjall2JqSd9pzkW56TuM2l80iSQxxj1E.blcyle8ZFkGtHhwVm";
 
 function isletmeIdZorunlu(isletmeId) {
@@ -138,6 +139,21 @@ export async function girisYap(isletmeId, { email, sifre } = {}) {
     return { hata: "E-posta veya şifre hatalı." };
   }
 
+  // İşletme kurulumunda veya kimlik sıfırlamasında admin hesabına geçici bir
+  // şifre tanımlanmışsa, tam oturum yerine "önce yeni şifre belirle" akışına
+  // yönlendirilir (bkz. ilkGirisSifreBelirle).
+  if (kullanici.sifre_degistirmeli) {
+    // tip:"kullanici" DEĞİL — tokenDogrula (korumaliMiddleware) yalnızca
+    // tip alanı boş veya "kullanici" olan token'ları geçerli sayar; bu farklı
+    // tip sayesinde şifre belirlenmeden bu token'la korumalı hiçbir uca girilemez.
+    const gecisToken = jwt.sign(
+      { id: kullanici.id, isletmeId: tenantId, tip: "sifre-belirleme", amac: "sifre-belirleme" },
+      JWT_SECRET,
+      { expiresIn: "15m" }
+    );
+    return { sifreDegisimGerekli: true, gecisToken };
+  }
+
   if (kullanici.iki_faktor_aktif) {
     const ikiFaktorToken = jwt.sign(
       { id: kullanici.id, isletmeId: tenantId, amac: "iki-faktor-giris" },
@@ -203,6 +219,32 @@ export async function ikiFaktorGirisiniTamamla(isletmeId, ikiFaktorToken, kod) {
   if (!await ikinciFaktoruDogrula(tenantId, cozulmus.id, kayit, kod)) {
     return { hata: "Doğrulama kodu veya kurtarma kodu geçersiz." };
   }
+  const kullanici = await kullaniciBulId(tenantId, cozulmus.id);
+  return { kullanici, token: tokenUret(cozulmus.id, tenantId) };
+}
+
+// Geçici şifreyle giriş yapan kullanıcının zorunlu ilk şifre belirleme adımı.
+// gecisToken yalnızca girisYap#sifre-belirleme dalından gelir ve tam oturum
+// açmaya yetmez; burada geçerliyse ve hesap hâlâ sifre_degistirmeli=true ise
+// yeni şifre kaydedilip normal bir oturum token'ı üretilir.
+export async function ilkGirisSifreBelirle(isletmeId, gecisToken, yeniSifre) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  let cozulmus;
+  try {
+    cozulmus = jwt.verify(String(gecisToken || ""), JWT_SECRET);
+  } catch {
+    return { hata: "Oturum süresi doldu. Lütfen tekrar giriş yapın." };
+  }
+  if (cozulmus.amac !== "sifre-belirleme" || !cozulmus.id || Number(cozulmus.isletmeId) !== tenantId) {
+    return { hata: "Geçersiz istek. Lütfen tekrar giriş yapın." };
+  }
+  const sifre = String(yeniSifre || "");
+  if (sifre.length < 8 || sifre.length > 72) {
+    return { hata: "Yeni şifre 8-72 karakter olmalıdır." };
+  }
+  const sifreHash = await bcrypt.hash(sifre, 10);
+  const guncellendi = await ilkGirisSifresiniGuncelle(tenantId, cozulmus.id, sifreHash);
+  if (!guncellendi) return { hata: "Şifre güncellenemedi. Lütfen tekrar giriş yapın." };
   const kullanici = await kullaniciBulId(tenantId, cozulmus.id);
   return { kullanici, token: tokenUret(cozulmus.id, tenantId) };
 }

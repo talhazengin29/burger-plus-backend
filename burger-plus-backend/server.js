@@ -72,7 +72,7 @@ import {
   kayitOl, girisYap, girisYapGenel, korumaliMiddleware, adminMiddleware, rolMiddleware,
   opsiyonelKullaniciMiddleware, tokenDogrula,
   sifirlamaTalepEt, sifirlamaTokenGecerliMi, sifreyiSifirla,
-  ikiFaktorGirisiniTamamla, ikiFaktorKurulumBaslat,
+  ikiFaktorGirisiniTamamla, ikiFaktorKurulumBaslat, ilkGirisSifreBelirle,
   ikiFaktorKurulumOnayla, ikiFaktorDevreDisiBirak,
   superAdminGiris, superAdminIkiFaktorGirisiniTamamla, superAdminMiddleware,
   superAdminErisimTokeniUret, impersonationTokeniniDogrula,
@@ -263,6 +263,14 @@ app.post("/api/giris", kimlikLimiti, async (req, res) => {
 app.post("/api/giris/2fa", ikiFaktorLimiti, async (req, res) => {
   const sonuc = await ikiFaktorGirisiniTamamla(req.isletme.id, req.body?.ikiFaktorToken, req.body?.kod);
   if (sonuc.hata) return res.status(401).json(sonuc);
+  res.json(sonuc);
+});
+
+// Geçici şifreyle girişten sonraki zorunlu adım: bkz. auth.js#girisYap
+// (sifreDegisimGerekli) ve #ilkGirisSifreBelirle.
+app.post("/api/giris/ilk-sifre", ikiFaktorLimiti, async (req, res) => {
+  const sonuc = await ilkGirisSifreBelirle(req.isletme.id, req.body?.gecisToken, req.body?.yeniSifre);
+  if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
 });
 

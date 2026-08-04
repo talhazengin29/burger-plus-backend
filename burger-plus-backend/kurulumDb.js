@@ -183,8 +183,8 @@ export async function isletmeKurulumunuYap(superAdminId, veri = {}, ip = "") {
     );
 
     const adminSonuc = await baglanti.query(
-      `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu)
-       VALUES ($1,$2,$3,$4,$5,'admin',$6) RETURNING id`,
+      `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli)
+       VALUES ($1,$2,$3,$4,$5,'admin',$6,true) RETURNING id`,
       [yeniIsletme.id, adminHesap.ad, adminHesap.soyad, adminHesap.email, adminSifreHash, davetKoduUret()]
     );
 

@@ -126,6 +126,10 @@ export async function tablolariHazirla(isletmeId) {
   // Şifremi unuttum akışı: şifre değişince o ana kadar üretilmiş JWT'ler
   // tokenDogrula içinde bu tarihle karşılaştırılıp geçersiz sayılır.
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS sifre_degisim_tarihi TIMESTAMPTZ");
+  // İşletme kurulumunda admin hesabına geçici bir şifre tanımlanır; bu bayrak
+  // açıkken girisYap normal oturum yerine "önce yeni şifre belirle" akışına
+  // yönlendirir (bkz. auth.js#girisYap / ilkGirisSifreBelirle).
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS sifre_degistirmeli BOOLEAN NOT NULL DEFAULT false");
   // İsteğe bağlı TOTP tabanlı iki adımlı doğrulama. TOTP sırları uygulama
   // katmanında AES-GCM ile şifrelenmiş olarak saklanır; kurtarma kodları hash'tir.
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS iki_faktor_aktif BOOLEAN NOT NULL DEFAULT false");
@@ -1106,6 +1110,19 @@ export async function sifreSifirlamaTokeniGecerliMi(isletmeId, tokenHash) {
      JOIN kullanicilar k ON k.id=s.kullanici_id AND k.isletme_id=$1
      WHERE s.token_hash=$2 AND s.kullanildi=false AND s.son_gecerlilik > NOW()`,
     [tenantId, tokenHash]
+  );
+  return sonuc.rows.length > 0;
+}
+
+// İlk girişte zorunlu şifre belirleme: yalnızca sifre_degistirmeli=true iken
+// çalışır, böylece kullanılmış bir gecis token'ı tekrar oynatılsa bile (bayrak
+// zaten kapandığı için) hiçbir şey yapmaz.
+export async function ilkGirisSifresiniGuncelle(isletmeId, kullaniciId, yeniSifreHash) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const sonuc = await pool.query(
+    `UPDATE kullanicilar SET sifre_hash=$1, sifre_degistirmeli=false, sifre_degisim_tarihi=NOW()
+     WHERE isletme_id=$2 AND id=$3 AND sifre_degistirmeli=true RETURNING id`,
+    [yeniSifreHash, tenantId, kullaniciId]
   );
   return sonuc.rows.length > 0;
 }
