@@ -139,6 +139,22 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
     }
   }
 
+  let tumuGorseli = mevcutTema.tumuGorseli || null;
+  if (girdi.tumuGorseli !== undefined) {
+    const deger = String(girdi.tumuGorseli || "").trim().slice(0, 1000);
+    if (!deger) {
+      tumuGorseli = null;
+    } else {
+      try {
+        const url = new URL(deger);
+        if (!["http:", "https:"].includes(url.protocol)) throw new Error();
+      } catch {
+        throw new Error("Tümü görseli geçerli bir http/https adresi olmalıdır.");
+      }
+      tumuGorseli = deger;
+    }
+  }
+
   return {
     konsept,
     tema: {
@@ -146,6 +162,7 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
       ozelPalet: girdi.ozelPalet == null ? mevcutTema.ozelPalet === true : girdi.ozelPalet === true,
       renkler,
       metinler,
+      ...(tumuGorseli ? { tumuGorseli } : {}),
     },
   };
 }
@@ -163,6 +180,7 @@ export function temaCoz(isletme) {
     font: { ...varsayilan.font, ...(ozel.font || {}) },
     metinler: { ...varsayilan.metinler, ...(ozel.metinler || {}) },
     ozelPalet: ozel.ozelPalet === true,
+    tumuGorseli: ozel.tumuGorseli || null,
     konsept,
     // Sıra önemli: işletmenin kendi yüklediği logo her zaman önce gelir,
     // yoksa konseptin varsayılan logosuna düşülür.
