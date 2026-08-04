@@ -183,16 +183,16 @@ export async function isletmeKurulumunuYap(superAdminId, veri = {}, ip = "") {
     );
 
     const adminSonuc = await baglanti.query(
-      `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli)
-       VALUES ($1,$2,$3,$4,$5,'admin',$6,true) RETURNING id`,
-      [yeniIsletme.id, adminHesap.ad, adminHesap.soyad, adminHesap.email, adminSifreHash, davetKoduUret()]
+      `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli,sifre_gecici_metin)
+       VALUES ($1,$2,$3,$4,$5,'admin',$6,true,$7) RETURNING id`,
+      [yeniIsletme.id, adminHesap.ad, adminHesap.soyad, adminHesap.email, adminSifreHash, davetKoduUret(), adminHesap.sifre]
     );
 
     for (const [indeks, personel] of personeller.entries()) {
       const kullanici = await baglanti.query(
-        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-        [yeniIsletme.id, personel.ad, personel.soyad, personel.email, personelHashleri[indeks], personel.rol, davetKoduUret()]
+        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli,sifre_gecici_metin)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8) RETURNING id`,
+        [yeniIsletme.id, personel.ad, personel.soyad, personel.email, personelHashleri[indeks], personel.rol, davetKoduUret(), personel.sifre]
       );
       await baglanti.query(
         `INSERT INTO personeller (isletme_id,ad,soyad,rol,email,saatlik_ucret,kullanici_id,aktif,arsivli)

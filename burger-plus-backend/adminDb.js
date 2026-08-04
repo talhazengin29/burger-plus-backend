@@ -680,18 +680,22 @@ export async function personelleriGetir(isletmeId) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await pool.query(`
     SELECT p.*,
+      k.sifre_degistirmeli, k.sifre_gecici_metin,
       v.id AS acik_vardiya_id, v.giris AS vardiya_giris,
       COALESCE((SELECT SUM(EXTRACT(EPOCH FROM (COALESCE(v2.cikis,NOW())-v2.giris))/3600)
                 FROM vardiyalar v2 WHERE v2.isletme_id=$1 AND v2.personel_id=p.id
                 AND v2.giris >= date_trunc('month',NOW())),0) AS aylik_saat
     FROM personeller p
     LEFT JOIN vardiyalar v ON v.isletme_id=$1 AND v.personel_id=p.id AND v.cikis IS NULL
+    LEFT JOIN kullanicilar k ON k.isletme_id=$1 AND k.id=p.kullanici_id
     WHERE p.isletme_id=$1 AND p.aktif=true AND p.arsivli=false ORDER BY p.ad,p.soyad
   `, [tenantId]);
   return sonuc.rows.map((p) => ({
     ...p,
     saatlik_ucret: Number(p.saatlik_ucret),
     aylik_saat: Number(p.aylik_saat),
+    // Sadece hesap sahibi kendi şifresini belirleyene kadar görünür.
+    sifre_gecici_metin: p.sifre_degistirmeli === true ? p.sifre_gecici_metin : null,
   }));
 }
 
@@ -724,10 +728,16 @@ export async function personelKaydet(isletmeId, veri) {
     if (kullaniciId) {
       const parametreler = [ad, soyad, email, telefon, hesapRolu, kullaniciId];
       if (sifre) {
-        parametreler.push(await bcrypt.hash(sifre, 12));
+        // Bu şifreyi personel değil, işletme admini belirliyor: geçicidir —
+        // personel ilk girişte kendi şifresini belirlemek zorunda kalır
+        // (bkz. auth.js#girisYap) ve admin, o ana kadar bu ekrandan tekrar
+        // görüntüleyebilir (bkz. personelleriGetir).
+        parametreler.push(await bcrypt.hash(sifre, 12), sifre);
         await baglanti.query(
-          `UPDATE kullanicilar SET ad=$1,soyad=$2,email=$3,telefon=$4,rol=$5,sifre_hash=$7
-           WHERE isletme_id=$8 AND id=$6`,
+          `UPDATE kullanicilar
+              SET ad=$1,soyad=$2,email=$3,telefon=$4,rol=$5,sifre_hash=$7,
+                  sifre_degistirmeli=true,sifre_gecici_metin=$8
+            WHERE isletme_id=$9 AND id=$6`,
           [...parametreler, tenantId]
         );
       } else {
@@ -739,9 +749,9 @@ export async function personelKaydet(isletmeId, veri) {
     } else {
       const sifreHash = await bcrypt.hash(sifre, 12);
       const hesap = await baglanti.query(
-        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,telefon,sifre_hash,rol,davet_kodu)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-        [tenantId, ad, soyad, email, telefon, sifreHash, hesapRolu, davetKoduUret()]
+        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,telefon,sifre_hash,rol,davet_kodu,sifre_degistirmeli,sifre_gecici_metin)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9) RETURNING id`,
+        [tenantId, ad, soyad, email, telefon, sifreHash, hesapRolu, davetKoduUret(), sifre]
       );
       kullaniciId = hesap.rows[0].id;
     }

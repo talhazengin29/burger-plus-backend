@@ -242,13 +242,15 @@ function adminDonustur(satir) {
     ikiFaktorAktif: satir.iki_faktor_aktif === true,
     olusturma: satir.olusturma,
     sifreDegisimTarihi: satir.sifre_degisim_tarihi,
+    sifreDegistirmeli: satir.sifre_degistirmeli === true,
+    sifreGeciciMetin: satir.sifre_degistirmeli === true ? satir.sifre_gecici_metin : null,
   };
 }
 
 export async function isletmeAdminleriniGetir(isletmeId, veritabani = pool) {
   const id = idDogrula(isletmeId, "isletmeId");
   const sonuc = await veritabani.query(
-    `SELECT id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi
+    `SELECT id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi,sifre_degistirmeli,sifre_gecici_metin
        FROM kullanicilar
       WHERE isletme_id=$1 AND rol='admin'
       ORDER BY id`,
@@ -292,16 +294,17 @@ export async function isletmeAdminHesabiniAyarla(isletmeId, veri = {}) {
       olusturuldu = false;
       await baglanti.query(
         `UPDATE kullanicilar
-            SET ad=$2, soyad=$3, sifre_hash=$4, rol='admin', sifre_degisim_tarihi=NOW(), sifre_degistirmeli=true
+            SET ad=$2, soyad=$3, sifre_hash=$4, rol='admin', sifre_degisim_tarihi=NOW(),
+                sifre_degistirmeli=true, sifre_gecici_metin=$5
           WHERE id=$1`,
-        [kullaniciId, ad, soyad, sifreHash]
+        [kullaniciId, ad, soyad, sifreHash, sifre]
       );
     } else {
       olusturuldu = true;
       const eklenen = await baglanti.query(
-        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli)
-         VALUES ($1,$2,$3,$4,$5,'admin',$6,true) RETURNING id`,
-        [id, ad, soyad, email, sifreHash, davetKoduUret()]
+        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli,sifre_gecici_metin)
+         VALUES ($1,$2,$3,$4,$5,'admin',$6,true,$7) RETURNING id`,
+        [id, ad, soyad, email, sifreHash, davetKoduUret(), sifre]
       );
       kullaniciId = Number(eklenen.rows[0].id);
     }

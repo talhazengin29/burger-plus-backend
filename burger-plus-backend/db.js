@@ -130,6 +130,12 @@ export async function tablolariHazirla(isletmeId) {
   // açıkken girisYap normal oturum yerine "önce yeni şifre belirle" akışına
   // yönlendirir (bkz. auth.js#girisYap / ilkGirisSifreBelirle).
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS sifre_degistirmeli BOOLEAN NOT NULL DEFAULT false");
+  // sifre_degistirmeli açıkken atanan şifrenin düz metni: kurulumu/hesabı
+  // yöneten kişi (super admin ya da işletme admini) tek seferlik gösterimi
+  // kaçırırsa tekrar görebilsin diye. Hesap sahibi kendi şifresini
+  // belirlediği an (ilkGirisSifresiniGuncelle) NULL'a döner ve bir daha
+  // hiçbir yerde saklanmaz — yalnızca geçici/atanmış şifreler için geçerlidir.
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS sifre_gecici_metin TEXT");
   // İsteğe bağlı TOTP tabanlı iki adımlı doğrulama. TOTP sırları uygulama
   // katmanında AES-GCM ile şifrelenmiş olarak saklanır; kurtarma kodları hash'tir.
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS iki_faktor_aktif BOOLEAN NOT NULL DEFAULT false");
@@ -1120,8 +1126,9 @@ export async function sifreSifirlamaTokeniGecerliMi(isletmeId, tokenHash) {
 export async function ilkGirisSifresiniGuncelle(isletmeId, kullaniciId, yeniSifreHash) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await pool.query(
-    `UPDATE kullanicilar SET sifre_hash=$1, sifre_degistirmeli=false, sifre_degisim_tarihi=NOW()
-     WHERE isletme_id=$2 AND id=$3 AND sifre_degistirmeli=true RETURNING id`,
+    `UPDATE kullanicilar
+        SET sifre_hash=$1, sifre_degistirmeli=false, sifre_gecici_metin=NULL, sifre_degisim_tarihi=NOW()
+      WHERE isletme_id=$2 AND id=$3 AND sifre_degistirmeli=true RETURNING id`,
     [yeniSifreHash, tenantId, kullaniciId]
   );
   return sonuc.rows.length > 0;
@@ -1147,7 +1154,14 @@ export async function sifreyiSifirla(isletmeId, tokenHash, yeniSifreHash) {
     }
     const { id, kullanici_id: kullaniciId } = token.rows[0];
     await baglanti.query(
-      "UPDATE kullanicilar SET sifre_hash=$1, sifre_degisim_tarihi=NOW() WHERE isletme_id=$2 AND id=$3",
+      // E-posta bağlantısıyla resetleyen kullanıcı kendi şifresini belirlemiş
+      // olur; hesap daha önce geçici bir şifreyle işaretlenmişse (bkz.
+      // sifre_degistirmeli) o durum da burada temizlenir — aksi halde bir
+      // sonraki girişte gereksiz yere "yeni şifre belirle" ekranına düşer ve
+      // artık geçersiz olan eski geçici şifre yönetim panelinde görünmeye devam eder.
+      `UPDATE kullanicilar
+          SET sifre_hash=$1, sifre_degisim_tarihi=NOW(), sifre_degistirmeli=false, sifre_gecici_metin=NULL
+        WHERE isletme_id=$2 AND id=$3`,
       [yeniSifreHash, tenantId, kullaniciId]
     );
     await baglanti.query("UPDATE sifre_sifirlama SET kullanildi=true WHERE id=$1", [id]);
