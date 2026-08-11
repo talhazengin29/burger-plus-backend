@@ -30,6 +30,13 @@ import pool, {
   odemeSaglayiciTokeniniGetir,
   iyzicoTokeniyleOdemeGetir,
   odemeMutfagaAktarildi,
+  nakitMasaDurumunuGetir,
+  nakitMasalariniGetir,
+  nakitMasasiniAc,
+  nakitSiparisOlustur,
+  nakitSiparisiOnayla,
+  nakitSiparisiReddet,
+  nakitSiparisiTahsilEt,
 } from "./db.js";
 import { iyzicoCheckoutBaslat, iyzicoSonucuGetir, iyzicoDonusAdresi } from "./iyzico.js";
 import {
@@ -176,6 +183,10 @@ const ikiFaktorLimiti = rateLimit({
 const superAdminGirisLimiti = rateLimit({
   windowMs: 15 * 60_000, limit: 5, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla super admin giriş denemesi yapıldı. 15 dakika sonra tekrar deneyin." },
+});
+const nakitSiparisLimiti = rateLimit({
+  windowMs: 5 * 60_000, limit: URETIM ? 12 : 60, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla nakit sipariş isteği gönderildi. Lütfen personelden yardım isteyin." },
 });
 
 const httpServer = createServer(app);
@@ -550,6 +561,64 @@ const guvenli = (islem) => async (req, res) => {
     if (!res.headersSent) res.status(400).json({ hata: e.message || "İşlem tamamlanamadı." });
   }
 };
+
+const salonRolu = () => rolMiddleware(["salon", "kasiyer"]);
+const nakitDegisikliginiYayinla = (tenantId, masaNo, siparis = null) => {
+  io.to(oda(tenantId, "salon")).emit("nakit-guncellendi", { masaNo });
+  if (masaNo) {
+    io.to(oda(tenantId, `masa-${masaNo}`)).emit("nakit-masa-guncellendi", {
+      masaNo,
+      ...(siparis ? { siparis } : {}),
+    });
+  }
+};
+
+app.get("/api/nakit/masa/:masaNo/durum", guvenli(async (req) => (
+  nakitMasaDurumunuGetir(req.isletme.id, req.params.masaNo)
+)));
+
+app.post("/api/nakit/siparis", nakitSiparisLimiti, opsiyonelKullaniciMiddleware(), guvenli(async (req, res) => {
+  const kullanici = req.kullanici || null;
+  const siparis = await nakitSiparisOlustur(req.isletme.id, {
+    kullaniciId: kullanici?.id || null,
+    masaNo: req.body?.masaNo,
+    urunler: req.body?.urunler,
+    kisiAdi: kullanici ? `${kullanici.ad} ${kullanici.soyad}`.trim() : "Misafir",
+  });
+  nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
+  res.status(201);
+  return { siparis };
+}));
+
+app.get("/api/nakit/masalar", salonRolu(), guvenli(async (req) => ({
+  masalar: await nakitMasalariniGetir(req.isletme.id),
+})));
+
+app.post("/api/nakit/masalar/:masaNo/ac", salonRolu(), guvenli(async (req) => {
+  const masa = await nakitMasasiniAc(req.isletme.id, req.params.masaNo, req.kullanici.id);
+  nakitDegisikliginiYayinla(req.isletme.id, masa.masaNo);
+  return { masa };
+}));
+
+app.post("/api/nakit/siparis/:id/onayla", salonRolu(), guvenli(async (req) => {
+  const siparis = await nakitSiparisiOnayla(req.isletme.id, req.params.id);
+  await onaylananOdemeyiMutfagaAktar(siparis);
+  nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, { ...siparis, durum: "nakit_bekliyor" });
+  return { siparis: { ...siparis, durum: "nakit_bekliyor", mutfagaAktarildi: true } };
+}));
+
+app.post("/api/nakit/siparis/:id/reddet", salonRolu(), guvenli(async (req) => {
+  const siparis = await nakitSiparisiReddet(req.isletme.id, req.params.id);
+  nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
+  return { siparis };
+}));
+
+app.post("/api/nakit/siparis/:id/tahsil", salonRolu(), guvenli(async (req) => {
+  const sonuc = await nakitSiparisiTahsilEt(req.isletme.id, req.params.id);
+  const siparis = sonuc.odeme;
+  nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
+  return { siparis };
+}));
 
 const superAdmin = superAdminMiddleware();
 const MUTASYON_METOTLARI = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -1006,6 +1075,7 @@ io.on("connection", (socket) => {
     if (!masaNo) return;
     socket.join(oda(tenantId, `masa-${masaNo}`));
     socket.emit("masa-guncellendi", await masaSiparisleriniGetir(tenantId, masaNo));
+    socket.emit("nakit-masa-guncellendi", await nakitMasaDurumunuGetir(tenantId, masaNo));
     console.log(`${socket.id} -> ${oda(tenantId, `masa-${masaNo}`)}`);
   });
 
@@ -1094,6 +1164,7 @@ io.on("connection", (socket) => {
       const tumMasalar = await tumAcikMasalar(tenantId);
       io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
       io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
+      nakitDegisikliginiYayinla(tenantId, masaNo);
       io.to(oda(tenantId, "yonetim")).emit("yonetim-operasyon-guncellendi", { masaNo, durum: "kapali", zaman: new Date().toISOString() });
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
       console.log(`Masa ${masaNo} kapatildi`);

@@ -243,6 +243,28 @@ export async function tablolariHazirla(isletmeId) {
       ON odeme_islemleri (kullanici_id, olusturma DESC);
   `);
 
+  // Nakit sipariş yalnızca salon personelinin açtığı masadan verilebilir.
+  // Her masa için tek güncel yetki kaydı tutulur; geçmiş siparişler ödeme
+  // kayıtlarında ve masa oturumlarında kalmaya devam eder.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS nakit_masalari (
+      isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
+      masa_no TEXT NOT NULL,
+      aktif BOOLEAN NOT NULL DEFAULT false,
+      acan_kullanici_id INTEGER REFERENCES kullanicilar(id) ON DELETE SET NULL,
+      kapatan_kullanici_id INTEGER REFERENCES kullanicilar(id) ON DELETE SET NULL,
+      acilis TIMESTAMPTZ,
+      kapanis TIMESTAMPTZ,
+      guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (isletme_id, masa_no)
+    );
+    CREATE INDEX IF NOT EXISTS nakit_masalari_aktif_idx
+      ON nakit_masalari (isletme_id, aktif, masa_no);
+    CREATE INDEX IF NOT EXISTS odeme_islemleri_nakit_bekleyen_idx
+      ON odeme_islemleri (isletme_id, masa_no, durum, olusturma)
+      WHERE saglayici='nakit' AND durum IN ('personel_onayi','nakit_bekliyor');
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS davet_odulleri (
       id BIGSERIAL PRIMARY KEY,
@@ -625,6 +647,174 @@ export async function odemeTaslagiOlustur(isletmeId, { kullaniciId = null, masaN
   return odemeDonustur(sonuc.rows[0]);
 }
 
+function nakitMasaNoDogrula(masaNo) {
+  const deger = String(masaNo || "").trim();
+  if (!/^[A-Za-z0-9_-]{1,30}$/.test(deger)) throw new Error("Masa numarası geçersiz.");
+  return deger;
+}
+
+export async function nakitMasaDurumunuGetir(isletmeId, masaNo) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const guvenliMasaNo = nakitMasaNoDogrula(masaNo);
+  const sonuc = await pool.query(
+    "SELECT aktif,acilis FROM nakit_masalari WHERE isletme_id=$1 AND masa_no=$2",
+    [tenantId, guvenliMasaNo]
+  );
+  return {
+    masaNo: guvenliMasaNo,
+    nakitAcik: sonuc.rows[0]?.aktif === true,
+    acilis: sonuc.rows[0]?.acilis || null,
+  };
+}
+
+export async function nakitMasalariniGetir(isletmeId) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const [ayar, masaKayitlari, siparisler] = await Promise.all([
+    pool.query("SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='masa_sayisi'", [tenantId]),
+    pool.query("SELECT masa_no,aktif,acilis,kapanis FROM nakit_masalari WHERE isletme_id=$1", [tenantId]),
+    pool.query(
+      `SELECT * FROM odeme_islemleri
+       WHERE isletme_id=$1 AND saglayici='nakit'
+         AND durum IN ('personel_onayi','nakit_bekliyor')
+       ORDER BY olusturma`,
+      [tenantId]
+    ),
+  ]);
+  const hamAyar = ayar.rows[0]?.deger;
+  const adet = Math.min(200, Math.max(1, Number(hamAyar?.adet ?? hamAyar ?? 20) || 20));
+  const kayitHaritasi = new Map(masaKayitlari.rows.map((masa) => [String(masa.masa_no), masa]));
+  const masaNumaralari = new Set(Array.from({ length: adet }, (_, sira) => String(sira + 1)));
+  masaKayitlari.rows.forEach((masa) => masaNumaralari.add(String(masa.masa_no)));
+  siparisler.rows.forEach((siparis) => masaNumaralari.add(String(siparis.masa_no)));
+  return [...masaNumaralari]
+    .sort((a, b) => a.localeCompare(b, "tr", { numeric: true }))
+    .map((masaNo) => {
+      const kayit = kayitHaritasi.get(masaNo);
+      return {
+        masaNo,
+        nakitAcik: kayit?.aktif === true,
+        acilis: kayit?.acilis || null,
+        kapanis: kayit?.kapanis || null,
+        siparisler: siparisler.rows.filter((siparis) => String(siparis.masa_no) === masaNo).map(odemeDonustur),
+      };
+    });
+}
+
+export async function nakitMasasiniAc(isletmeId, masaNo, kullaniciId) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const guvenliMasaNo = nakitMasaNoDogrula(masaNo);
+  await pool.query(
+    `INSERT INTO nakit_masalari
+      (isletme_id,masa_no,aktif,acan_kullanici_id,kapatan_kullanici_id,acilis,kapanis,guncelleme)
+     VALUES ($1,$2,true,$3,NULL,NOW(),NULL,NOW())
+     ON CONFLICT (isletme_id,masa_no) DO UPDATE SET
+       aktif=true, acan_kullanici_id=EXCLUDED.acan_kullanici_id,
+       kapatan_kullanici_id=NULL, acilis=NOW(), kapanis=NULL, guncelleme=NOW()`,
+    [tenantId, guvenliMasaNo, kullaniciId || null]
+  );
+  return nakitMasaDurumunuGetir(tenantId, guvenliMasaNo);
+}
+
+export async function nakitSiparisOlustur(isletmeId, { kullaniciId = null, masaNo, urunler, kisiAdi = "Misafir" }) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const guvenliMasaNo = nakitMasaNoDogrula(masaNo);
+  const guvenliUrunler = await odemeUrunleriniDogrula(tenantId, urunler, kullaniciId);
+  const tutar = guvenliUrunler.reduce((toplam, urun) => toplam + urun.fiyat * urun.adet, 0);
+  const kazanilanPuan = kullaniciId ? Math.floor(tutar / 10) : 0;
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const masa = await baglanti.query(
+      "SELECT aktif FROM nakit_masalari WHERE isletme_id=$1 AND masa_no=$2 FOR UPDATE",
+      [tenantId, guvenliMasaNo]
+    );
+    if (masa.rows[0]?.aktif !== true) throw new Error("Bu masa nakit siparişe açık değil. Personelden masayı açmasını isteyin.");
+    const id = randomUUID();
+    const siparisNo = `BP-N-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const sonuc = await baglanti.query(
+      `INSERT INTO odeme_islemleri
+        (isletme_id,id,kullanici_id,siparis_no,masa_no,siparis_tipi,yontem,kisi_adi,
+         urunler,tutar,kazanilan_puan,saglayici,durum,son_gecerlilik)
+       VALUES ($1,$2,$3,$4,$5,'masa','tam',$6,$7::jsonb,$8,$9,'nakit','personel_onayi',NOW()+INTERVAL '6 hours')
+       RETURNING *`,
+      [tenantId, id, kullaniciId, siparisNo, guvenliMasaNo,
+        String(kisiAdi || "Misafir").trim().slice(0, 120) || "Misafir",
+        JSON.stringify(guvenliUrunler), tutar, kazanilanPuan]
+    );
+    await baglanti.query("COMMIT");
+    return odemeDonustur(sonuc.rows[0]);
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
+}
+
+export async function nakitSiparisiOnayla(isletmeId, id) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const sonuc = await baglanti.query(
+      `UPDATE odeme_islemleri SET durum='nakit_bekliyor',guncelleme=NOW()
+       WHERE isletme_id=$1 AND id=$2 AND saglayici='nakit' AND durum='personel_onayi'
+       RETURNING *`,
+      [tenantId, id]
+    );
+    let odeme = sonuc.rows[0];
+    if (!odeme) {
+      const mevcut = await baglanti.query(
+        "SELECT * FROM odeme_islemleri WHERE isletme_id=$1 AND id=$2 AND saglayici='nakit' AND durum='nakit_bekliyor'",
+        [tenantId, id]
+      );
+      odeme = mevcut.rows[0];
+    }
+    if (!odeme) throw new Error("Sipariş onaylanabilir durumda değil.");
+    if (odeme.kullanici_id) {
+      await baglanti.query(
+        `INSERT INTO kullanici_siparisleri
+          (isletme_id,kullanici_id,siparis_no,masa_no,tip,urunler,tutar,kazanilan_puan,durum)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,0,'yeni')
+         ON CONFLICT (kullanici_id,siparis_no) DO NOTHING`,
+        [tenantId, odeme.kullanici_id, odeme.siparis_no, odeme.masa_no,
+          odeme.siparis_tipi, JSON.stringify(odeme.urunler), odeme.tutar]
+      );
+    }
+    await baglanti.query("COMMIT");
+    return odemeDonustur(odeme);
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
+}
+
+export async function nakitSiparisiReddet(isletmeId, id) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const sonuc = await pool.query(
+    `UPDATE odeme_islemleri SET durum='reddedildi',guncelleme=NOW()
+     WHERE isletme_id=$1 AND id=$2 AND saglayici='nakit' AND durum='personel_onayi'
+     RETURNING *`,
+    [tenantId, id]
+  );
+  if (!sonuc.rows.length) throw new Error("Sipariş reddedilebilir durumda değil.");
+  return odemeDonustur(sonuc.rows[0]);
+}
+
+export async function nakitSiparisiTahsilEt(isletmeId, id) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const uygun = await pool.query(
+    `SELECT mutfaga_aktarildi FROM odeme_islemleri
+     WHERE isletme_id=$1 AND id=$2 AND saglayici='nakit' AND durum='nakit_bekliyor'`,
+    [tenantId, id]
+  );
+  if (!uygun.rows.length) throw new Error("Sipariş tahsil edilebilir durumda değil.");
+  if (uygun.rows[0].mutfaga_aktarildi !== true) throw new Error("Sipariş mutfağa aktarılmadan tahsilat tamamlanamaz.");
+  return odemeBasariliOlarakIsle(tenantId, id, "nakit", null, null, "nakit_bekliyor");
+}
+
 export async function odemeSimulasyonOnayla(isletmeId, id, kullaniciId = null) {
   return odemeBasariliOlarakIsle(isletmeId, id, "simulasyon", null, kullaniciId);
 }
@@ -633,22 +823,22 @@ export async function odemeIyzicoOlarakOnayla(isletmeId, id, token) {
   return odemeBasariliOlarakIsle(isletmeId, id, "iyzico", token, null);
 }
 
-async function odemeBasariliOlarakIsle(isletmeId, id, saglayici, saglayiciToken, kullaniciId = null) {
+async function odemeBasariliOlarakIsle(isletmeId, id, saglayici, saglayiciToken, kullaniciId = null, beklenenDurum = "bekliyor") {
   const tenantId = isletmeIdZorunlu(isletmeId);
   // İyzico sonucu sağlayıcıdan doğrulanmış gerçek bir tahsilattır. Kullanıcı
   // ödeme formundayken yerel taslak süresi dolsa bile alınmış ödemeyi reddetme.
   // Simülasyonda ise eski taslakların onaylanmasını engellemeye devam et.
-  const sureKosulu = saglayici === "iyzico" ? "" : "AND son_gecerlilik > NOW()";
+  const sureKosulu = ["iyzico", "nakit"].includes(saglayici) ? "" : "AND son_gecerlilik > NOW()";
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
     const sonuc = await baglanti.query(
       `UPDATE odeme_islemleri
        SET durum='basarili', saglayici=$3, saglayici_token=COALESCE($4, saglayici_token), basarili_at=NOW(), guncelleme=NOW()
-       WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' ${sureKosulu}
+       WHERE isletme_id=$1 AND id=$2 AND durum=$6 ${sureKosulu}
          AND ($5::int IS NULL OR kullanici_id=$5)
        RETURNING *`,
-      [tenantId, id, saglayici, saglayiciToken, kullaniciId]
+      [tenantId, id, saglayici, saglayiciToken, kullaniciId, beklenenDurum]
     );
     if (sonuc.rows.length) {
       const odeme = sonuc.rows[0];
@@ -673,7 +863,8 @@ async function odemeBasariliOlarakIsle(isletmeId, id, saglayici, saglayiciToken,
           `INSERT INTO kullanici_siparisleri
             (isletme_id,kullanici_id,siparis_no,masa_no,tip,urunler,tutar,kazanilan_puan,durum)
            VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,'hazirlaniyor')
-           ON CONFLICT (kullanici_id,siparis_no) DO NOTHING`,
+           ON CONFLICT (kullanici_id,siparis_no) DO UPDATE SET
+             kazanilan_puan=EXCLUDED.kazanilan_puan`,
           [tenantId, odeme.kullanici_id, odeme.siparis_no, odeme.masa_no, odeme.siparis_tipi,
             JSON.stringify(odeme.urunler), odeme.tutar, odeme.kazanilan_puan]
         );
@@ -813,7 +1004,7 @@ export async function iyzicoTokeniyleOdemeGetir(token) {
 export async function odemeMutfagaAktarildi(isletmeId, id) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   await pool.query(
-    "UPDATE odeme_islemleri SET mutfaga_aktarildi=true, guncelleme=NOW() WHERE isletme_id=$1 AND id=$2 AND durum='basarili'",
+    "UPDATE odeme_islemleri SET mutfaga_aktarildi=true, guncelleme=NOW() WHERE isletme_id=$1 AND id=$2 AND durum IN ('basarili','nakit_bekliyor')",
     [tenantId, id]
   );
 }
@@ -831,6 +1022,7 @@ function odemeDonustur(odeme) {
     urunler: Array.isArray(odeme.urunler) ? odeme.urunler : [],
     tutar: Number(odeme.tutar),
     kazanilanPuan: Number(odeme.kazanilan_puan),
+    saglayici: odeme.saglayici,
     durum: odeme.durum,
     mutfagaAktarildi: odeme.mutfaga_aktarildi,
     tarih: odeme.olusturma,
@@ -916,15 +1108,32 @@ export async function tumAcikMasalar(isletmeId) {
 // ama yeni gelen musteri temiz masayla baslar (yeni oturum acilir).
 export async function masaKapat(isletmeId, masaNo, kullaniciId = null) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  const guvenliMasaNo = nakitMasaNoDogrula(masaNo);
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
+    // Masa kapatma ile aynı anda yeni nakit sipariş oluşturulmasını engelle.
+    // Sipariş oluşturma da bu satırı FOR UPDATE kilitlediği için iki işlem
+    // sıraya girer ve kapalı masada bekleyen sipariş bırakılamaz.
+    await baglanti.query(
+      "SELECT aktif FROM nakit_masalari WHERE isletme_id=$1 AND masa_no=$2 FOR UPDATE",
+      [tenantId, guvenliMasaNo]
+    );
+    const acikNakit = await baglanti.query(
+      `SELECT COUNT(*)::int AS adet FROM odeme_islemleri
+       WHERE isletme_id=$1 AND masa_no=$2 AND saglayici='nakit'
+         AND durum IN ('personel_onayi','nakit_bekliyor')`,
+      [tenantId, guvenliMasaNo]
+    );
+    if (Number(acikNakit.rows[0]?.adet) > 0) {
+      throw new Error("Bekleyen veya tahsil edilmemiş nakit siparişler varken masa kapatılamaz.");
+    }
     const personel = kullaniciId
       ? await baglanti.query("SELECT id FROM personeller WHERE isletme_id=$1 AND kullanici_id=$2 AND aktif=true AND arsivli=false LIMIT 1", [tenantId, kullaniciId])
       : { rows: [] };
     const oturumlar = await baglanti.query(
       "UPDATE oturumlar SET durum='kapali',kapandi_at=NOW(),kapatan_personel_id=$3 WHERE isletme_id=$1 AND masa_no=$2 AND durum='acik' RETURNING id",
-      [tenantId, masaNo, personel.rows[0]?.id || null]
+      [tenantId, guvenliMasaNo, personel.rows[0]?.id || null]
     );
     const oturumIdleri = oturumlar.rows.map((satir) => satir.id);
     if (oturumIdleri.length) {
@@ -942,6 +1151,11 @@ export async function masaKapat(isletmeId, masaNo, kullaniciId = null) {
         );
       }
     }
+    await baglanti.query(
+      `UPDATE nakit_masalari SET aktif=false,kapatan_kullanici_id=$3,kapanis=NOW(),guncelleme=NOW()
+       WHERE isletme_id=$1 AND masa_no=$2 AND aktif=true`,
+      [tenantId, guvenliMasaNo, kullaniciId || null]
+    );
     await baglanti.query("COMMIT");
   } catch (e) {
     await baglanti.query("ROLLBACK");
@@ -949,7 +1163,7 @@ export async function masaKapat(isletmeId, masaNo, kullaniciId = null) {
   } finally {
     baglanti.release();
   }
-  return masaSiparisleriniGetir(tenantId, masaNo);
+  return masaSiparisleriniGetir(tenantId, guvenliMasaNo);
 }
 
 // ============================================================================
