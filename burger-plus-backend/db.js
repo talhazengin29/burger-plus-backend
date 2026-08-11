@@ -487,7 +487,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
 
   const sonuc = await pool.query(
     `SELECT id,ad,fiyat,kategori,gorsel,malzemeler,temel_miktar,gramaj_opsiyonu,urun_tipi,
-            boyut_secenekleri,menu_yapisi,aktif
+            boyut_secenekleri,menu_yapisi,aktif,stok_takibi,stok_adedi
      FROM urunler WHERE isletme_id=$1 AND id = ANY($2::int[]) AND arsivli=false`,
     [tenantId, idler]
   );
@@ -518,6 +518,9 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     if (!urun || !urun.aktif) throw new Error("Sepetteki ürün artık satışta değil.");
     const adet = Math.floor(Number(ham?.adet || 0));
     if (!Number.isInteger(adet) || adet < 1 || adet > 30) throw new Error("Ürün adedi geçersiz.");
+    if (urun.stok_takibi === true && Number(urun.stok_adedi) < adet) {
+      throw new Error(`${urun.ad} için yeterli stok bulunmuyor.`);
+    }
 
     const gonderilenSecimler = ham?.secimler && typeof ham.secimler === "object" ? ham.secimler : {};
     const urunTipi = urun.urun_tipi || "burger";
@@ -624,8 +627,102 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
   });
 }
 
+function urunAdetleriniTopla(urunler) {
+  const adetler = new Map();
+  for (const urun of urunler || []) {
+    const urunId = Number(urun?.id);
+    const adet = Math.max(1, Math.floor(Number(urun?.adet || 1)));
+    if (Number.isInteger(urunId)) adetler.set(urunId, (adetler.get(urunId) || 0) + adet);
+    for (const bagliId of [urun?.secimler?.menuBurgerId, urun?.secimler?.yanLezzetId, urun?.secimler?.icecekId]) {
+      const id = Number(bagliId);
+      if (Number.isInteger(id)) adetler.set(id, (adetler.get(id) || 0) + adet);
+    }
+  }
+  return adetler;
+}
+
+async function suresiDolanStoklariBirak(baglanti, tenantId) {
+  await baglanti.query(`
+    WITH birakilan AS (
+      UPDATE stok_rezervasyonlari
+      SET durum='birakildi', guncelleme=NOW()
+      WHERE isletme_id=$1 AND durum='aktif' AND son_gecerlilik <= NOW()
+      RETURNING urun_id, adet
+    ), toplam AS (
+      SELECT urun_id, SUM(adet)::int adet FROM birakilan GROUP BY urun_id
+    )
+    UPDATE urunler u SET stok_adedi=u.stok_adedi+toplam.adet, guncelleme=NOW()
+    FROM toplam WHERE u.isletme_id=$1 AND u.id=toplam.urun_id
+  `, [tenantId]);
+}
+
+async function siparisStogunuIsle(baglanti, tenantId, odemeId, urunler, { rezervasyon = false, stokAciginaIzinVer = false } = {}) {
+  const adetler = urunAdetleriniTopla(urunler);
+  if (!adetler.size) return;
+  const idler = [...adetler.keys()];
+  const urunSonucu = await baglanti.query(
+    `SELECT id,ad,stok_takibi,stok_adedi FROM urunler
+     WHERE isletme_id=$1 AND id=ANY($2::int[]) AND arsivli=false FOR UPDATE`,
+    [tenantId, idler]
+  );
+  const mevcutRezervasyonlar = await baglanti.query(
+    "SELECT urun_id,durum FROM stok_rezervasyonlari WHERE isletme_id=$1 AND odeme_id=$2 FOR UPDATE",
+    [tenantId, odemeId]
+  );
+  const rezervasyonDurumlari = new Map(mevcutRezervasyonlar.rows.map((satir) => [Number(satir.urun_id), satir.durum]));
+
+  for (const urun of urunSonucu.rows.filter((satir) => satir.stok_takibi === true)) {
+    const urunId = Number(urun.id);
+    const adet = adetler.get(urunId) || 0;
+    const mevcutDurum = rezervasyonDurumlari.get(urunId);
+    if (mevcutDurum === "tuketildi") continue;
+    if (!rezervasyon && mevcutDurum === "aktif") {
+      await baglanti.query(
+        "UPDATE stok_rezervasyonlari SET durum='tuketildi',guncelleme=NOW() WHERE odeme_id=$1 AND urun_id=$2",
+        [odemeId, urunId]
+      );
+      continue;
+    }
+    if (rezervasyon && mevcutDurum === "aktif") continue;
+    if (Number(urun.stok_adedi) < adet && !stokAciginaIzinVer) throw new Error(`${urun.ad} için yeterli stok bulunmuyor.`);
+    await baglanti.query(
+      "UPDATE urunler SET stok_adedi=GREATEST(0,stok_adedi-$1),guncelleme=NOW() WHERE isletme_id=$2 AND id=$3",
+      [adet, tenantId, urunId]
+    );
+    await baglanti.query(
+      `INSERT INTO stok_rezervasyonlari (odeme_id,isletme_id,urun_id,adet,durum,son_gecerlilik)
+       VALUES ($1,$2,$3,$4,$5,NOW()+INTERVAL '20 minutes')
+       ON CONFLICT (odeme_id,urun_id) DO UPDATE SET
+         adet=EXCLUDED.adet, durum=EXCLUDED.durum, son_gecerlilik=EXCLUDED.son_gecerlilik, guncelleme=NOW()`,
+      [odemeId, tenantId, urunId, adet, rezervasyon ? "aktif" : "tuketildi"]
+    );
+  }
+}
+
+export async function suresiDolanStokRezervasyonlariniBirak(isletmeId) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  await suresiDolanStoklariBirak(pool, tenantId);
+}
+
+export async function siparisStogunuKesinlestir(isletmeId, odemeId, urunler) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    await suresiDolanStoklariBirak(baglanti, tenantId);
+    await siparisStogunuIsle(baglanti, tenantId, odemeId, urunler);
+    await baglanti.query("COMMIT");
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
+}
+
 export async function odemeTaslagiOlustur(isletmeId, { kullaniciId = null, masaNo = null, yontem = "tam", urunler, kisiAdi = "Misafir" }) {
   const tenantId = isletmeIdZorunlu(isletmeId);
+  await suresiDolanStoklariBirak(pool, tenantId);
   const guvenliUrunler = await odemeUrunleriniDogrula(tenantId, urunler, kullaniciId);
   const hamMasa = masaNo == null || masaNo === "" ? null : String(masaNo).trim();
   if (hamMasa && !/^[A-Za-z0-9_-]{1,30}$/.test(hamMasa)) throw new Error("Masa numarası geçersiz.");
@@ -636,15 +733,27 @@ export async function odemeTaslagiOlustur(isletmeId, { kullaniciId = null, masaN
   const kazanilanPuan = kullaniciId ? Math.floor(tutar / 10) : 0;
   const id = randomUUID();
   const siparisNo = `BP-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const sonuc = await pool.query(
-    `INSERT INTO odeme_islemleri
-      (isletme_id,id,kullanici_id,siparis_no,masa_no,siparis_tipi,yontem,kisi_adi,urunler,tutar,kazanilan_puan)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11) RETURNING *`,
-    [tenantId, id, kullaniciId, siparisNo, guvenliMasa, tip, guvenliYontem,
-      String(kisiAdi || "Misafir").trim().slice(0, 120) || "Misafir",
-      JSON.stringify(guvenliUrunler), tutar, kazanilanPuan]
-  );
-  return odemeDonustur(sonuc.rows[0]);
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    await suresiDolanStoklariBirak(baglanti, tenantId);
+    const sonuc = await baglanti.query(
+      `INSERT INTO odeme_islemleri
+        (isletme_id,id,kullanici_id,siparis_no,masa_no,siparis_tipi,yontem,kisi_adi,urunler,tutar,kazanilan_puan)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11) RETURNING *`,
+      [tenantId, id, kullaniciId, siparisNo, guvenliMasa, tip, guvenliYontem,
+        String(kisiAdi || "Misafir").trim().slice(0, 120) || "Misafir",
+        JSON.stringify(guvenliUrunler), tutar, kazanilanPuan]
+    );
+    await siparisStogunuIsle(baglanti, tenantId, id, guvenliUrunler, { rezervasyon: true });
+    await baglanti.query("COMMIT");
+    return odemeDonustur(sonuc.rows[0]);
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
 }
 
 function nakitMasaNoDogrula(masaNo) {
@@ -718,6 +827,7 @@ export async function nakitMasasiniAc(isletmeId, masaNo, kullaniciId) {
 export async function nakitSiparisOlustur(isletmeId, { kullaniciId = null, masaNo, urunler, kisiAdi = "Misafir" }) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const guvenliMasaNo = nakitMasaNoDogrula(masaNo);
+  await suresiDolanStoklariBirak(pool, tenantId);
   const guvenliUrunler = await odemeUrunleriniDogrula(tenantId, urunler, kullaniciId);
   const tutar = guvenliUrunler.reduce((toplam, urun) => toplam + urun.fiyat * urun.adet, 0);
   const kazanilanPuan = kullaniciId ? Math.floor(tutar / 10) : 0;
@@ -771,6 +881,8 @@ export async function nakitSiparisiOnayla(isletmeId, id) {
       odeme = mevcut.rows[0];
     }
     if (!odeme) throw new Error("Sipariş onaylanabilir durumda değil.");
+    await suresiDolanStoklariBirak(baglanti, tenantId);
+    await siparisStogunuIsle(baglanti, tenantId, odeme.id, odeme.urunler);
     if (odeme.kullanici_id) {
       await baglanti.query(
         `INSERT INTO kullanici_siparisleri
@@ -842,6 +954,8 @@ async function odemeBasariliOlarakIsle(isletmeId, id, saglayici, saglayiciToken,
     );
     if (sonuc.rows.length) {
       const odeme = sonuc.rows[0];
+      await suresiDolanStoklariBirak(baglanti, tenantId);
+      await siparisStogunuIsle(baglanti, tenantId, odeme.id, odeme.urunler, { stokAciginaIzinVer: saglayici === "iyzico" });
       let guncelPuan = null;
       if (odeme.kullanici_id && Number(odeme.kazanilan_puan) > 0) {
         const puanSonuc = await baglanti.query(
@@ -976,13 +1090,29 @@ export async function odemeGetir(isletmeId, id) {
 
 export async function odemeSaglayiciTokenKaydet(isletmeId, id, token) {
   const tenantId = isletmeIdZorunlu(isletmeId);
-  const sonuc = await pool.query(
-    `UPDATE odeme_islemleri SET saglayici='iyzico', saglayici_token=$3, guncelleme=NOW()
-     WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' AND son_gecerlilik > NOW() RETURNING *`,
-    [tenantId, id, token]
-  );
-  if (!sonuc.rows.length) throw new Error("Ödeme taslağı ödeme başlatmak için uygun değil.");
-  return odemeDonustur(sonuc.rows[0]);
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    const sonuc = await baglanti.query(
+      `UPDATE odeme_islemleri SET saglayici='iyzico', saglayici_token=$3,
+         son_gecerlilik=NOW()+INTERVAL '60 minutes', guncelleme=NOW()
+       WHERE isletme_id=$1 AND id=$2 AND durum='bekliyor' AND son_gecerlilik > NOW() RETURNING *`,
+      [tenantId, id, token]
+    );
+    if (!sonuc.rows.length) throw new Error("Ödeme taslağı ödeme başlatmak için uygun değil.");
+    await baglanti.query(
+      `UPDATE stok_rezervasyonlari SET son_gecerlilik=NOW()+INTERVAL '60 minutes',guncelleme=NOW()
+       WHERE isletme_id=$1 AND odeme_id=$2 AND durum='aktif'`,
+      [tenantId, id]
+    );
+    await baglanti.query("COMMIT");
+    return odemeDonustur(sonuc.rows[0]);
+  } catch (e) {
+    await baglanti.query("ROLLBACK");
+    throw e;
+  } finally {
+    baglanti.release();
+  }
 }
 
 export async function odemeSaglayiciTokeniniGetir(isletmeId, id) {

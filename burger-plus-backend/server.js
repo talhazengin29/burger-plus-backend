@@ -37,6 +37,8 @@ import pool, {
   nakitSiparisiOnayla,
   nakitSiparisiReddet,
   nakitSiparisiTahsilEt,
+  suresiDolanStokRezervasyonlariniBirak,
+  siparisStogunuKesinlestir,
 } from "./db.js";
 import { iyzicoCheckoutBaslat, iyzicoSonucuGetir, iyzicoDonusAdresi } from "./iyzico.js";
 import {
@@ -388,6 +390,7 @@ app.get("/api/mutfak", rolMiddleware(["mutfak", "salon", "kasiyer"]), async (req
 });
 // Aktif ürün kataloğu müşteri uygulamasına açıktır.
 app.get("/api/urunler", async (req, res) => {
+  await suresiDolanStokRezervasyonlariniBirak(req.isletme.id);
   res.json({ urunler: await urunleriGetir(req.isletme.id) });
 });
 app.get("/api/oneriler", async (req, res) => {
@@ -843,7 +846,7 @@ app.post(
     return yanit;
   })
 );
-app.get("/api/admin/urunler", admin, guvenli(async (req) => ({ urunler: await urunleriGetir(req.isletme.id, { tumu: true }) })));
+app.get("/api/admin/urunler", admin, guvenli(async (req) => ({ urunler: await urunleriGetir(req.isletme.id, { tumu: true, stokDetayi: true }) })));
 app.post("/api/admin/urunler", admin, guvenli(async (req) => {
   const t = req.isletme.id;
   const eski = req.body.id ? await yonetimVarliginiGetir(t, "urun", req.body.id) : null;
@@ -994,6 +997,8 @@ async function onaylananOdemeyiMutfagaAktar(odeme) {
   if (!Number.isSafeInteger(tenantId) || tenantId < 1) throw new Error("Ödemeye ait işletme bilgisi geçersiz.");
   const masaNo = odeme.masaNo || "algotur";
   await masaSirayaAl(tenantId, masaNo, async () => {
+    await siparisStogunuKesinlestir(tenantId, odeme.id, odeme.urunler);
+    io.to(oda(tenantId, "genel")).emit("urunler-guncellendi", await urunleriGetir(tenantId));
     for (const [kalemNo, urun] of odeme.urunler.entries()) {
       await kalemEkle(
         tenantId, masaNo, urun, odeme.kisiAdi, urun.secimler, urun.haricMalzemeler,

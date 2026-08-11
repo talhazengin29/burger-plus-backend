@@ -255,6 +255,8 @@ export async function adminTablolariHazirla(isletmeId) {
       menu_yapisi JSONB,
       onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb,
       populer BOOLEAN NOT NULL DEFAULT false,
+      stok_takibi BOOLEAN NOT NULL DEFAULT false,
+      stok_adedi INTEGER NOT NULL DEFAULT 0 CHECK (stok_adedi >= 0),
       arsivli BOOLEAN NOT NULL DEFAULT false,
       aktif BOOLEAN NOT NULL DEFAULT true,
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -348,6 +350,8 @@ export async function adminTablolariHazirla(isletmeId) {
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS menu_yapisi JSONB");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS populer BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS stok_takibi BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS stok_adedi INTEGER NOT NULL DEFAULT 0");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE kategoriler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE personeller ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
@@ -359,6 +363,21 @@ export async function adminTablolariHazirla(isletmeId) {
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlayan_personel_id INTEGER");
   await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapandi_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE oturumlar ADD COLUMN IF NOT EXISTS kapatan_personel_id INTEGER");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stok_rezervasyonlari (
+      odeme_id UUID NOT NULL REFERENCES odeme_islemleri(id) ON DELETE CASCADE,
+      isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
+      urun_id INTEGER NOT NULL REFERENCES urunler(id) ON DELETE RESTRICT,
+      adet INTEGER NOT NULL CHECK (adet > 0),
+      durum TEXT NOT NULL DEFAULT 'aktif' CHECK (durum IN ('aktif','tuketildi','birakildi')),
+      son_gecerlilik TIMESTAMPTZ NOT NULL,
+      olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (odeme_id, urun_id)
+    );
+    CREATE INDEX IF NOT EXISTS stok_rezervasyonlari_sure_idx
+      ON stok_rezervasyonlari (isletme_id, durum, son_gecerlilik);
+  `);
   await pool.query(`
     DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='siparis_hazirlayan_personel_fkey') THEN
@@ -470,7 +489,7 @@ export async function adminTablolariHazirla(isletmeId) {
   }
 }
 
-function urunDonustur(u) {
+function urunDonustur(u, { stokDetayi = false } = {}) {
   const urun = {
     id: u.id,
     ad: u.ad,
@@ -487,13 +506,16 @@ function urunDonustur(u) {
     menuYapisi: u.menu_yapisi || null,
     onerilenUrunler: Array.isArray(u.onerilen_urunler) ? u.onerilen_urunler.map(Number).filter(Number.isInteger) : [],
     populer: u.populer === true,
+    stokTakibi: u.stok_takibi === true,
+    stokta: u.stok_takibi !== true || Number(u.stok_adedi) > 0,
     aktif: u.aktif,
   };
+  if (stokDetayi) urun.stokAdedi = Number(u.stok_adedi || 0);
   if (u.gramaj_opsiyonu != null) urun.gramajOpsiyonu = u.gramaj_opsiyonu;
   return urun;
 }
 
-export async function urunleriGetir(isletmeId, { tumu = false } = {}) {
+export async function urunleriGetir(isletmeId, { tumu = false, stokDetayi = false } = {}) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await pool.query(`
     SELECT u.*
@@ -501,7 +523,20 @@ export async function urunleriGetir(isletmeId, { tumu = false } = {}) {
     WHERE u.isletme_id=$1 AND u.arsivli=false ${tumu ? "" : "AND u.aktif=true"}
     ORDER BY u.kategori, u.ad
   `, [tenantId]);
-  return sonuc.rows.map(urunDonustur);
+  const stoklar = new Map(sonuc.rows.map((urun) => [Number(urun.id), {
+    takip: urun.stok_takibi === true,
+    adet: Number(urun.stok_adedi || 0),
+  }]));
+  return sonuc.rows.map((satir) => {
+    const urun = urunDonustur(satir, { stokDetayi });
+    if (urun.urunTipi === "menu") {
+      const menu = urun.menuYapisi || {};
+      const bagliStoklar = [menu.burgerUrunId, menu.yanLezzetUrunId, menu.icecekUrunId]
+        .map(Number).map((id) => stoklar.get(id)).filter(Boolean);
+      if (bagliStoklar.some((stok) => stok.takip && stok.adet < 1)) urun.stokta = false;
+    }
+    return urun;
+  });
 }
 
 function kategoriDonustur(kategori) {
@@ -581,6 +616,11 @@ export async function urunKaydet(isletmeId, veri) {
   const boyutSecenekleri = boyutSecenekleriniDogrula(veri.boyutSecenekleri, urunTipi);
   const menuYapisi = await menuYapisiniDogrula(tenantId, veri.menuYapisi, urunTipi);
   const onerilenUrunler = await onerilenUrunleriDogrula(tenantId, veri.onerilenUrunler, veri.id);
+  const stokTakibi = veri.stokTakibi === true;
+  const stokAdedi = stokTakibi ? Math.floor(Number(veri.stokAdedi)) : 0;
+  if (stokTakibi && (!Number.isSafeInteger(stokAdedi) || stokAdedi < 0 || stokAdedi > 1000000)) {
+    throw new Error("Stok adedi 0 ile 1.000.000 arasında olmalıdır.");
+  }
   const alanlar = [
     String(veri.ad || "").trim().slice(0, 120),
     sayi(veri.fiyat),
@@ -597,6 +637,8 @@ export async function urunKaydet(isletmeId, veri) {
     JSON.stringify(onerilenUrunler),
     veri.aktif !== false,
     veri.populer === true,
+    stokTakibi,
+    stokAdedi,
   ];
   if (!alanlar[0] || alanlar[1] < 0) throw new Error("Ürün adı ve geçerli fiyat zorunludur.");
   await pool.query(
@@ -609,17 +651,18 @@ export async function urunKaydet(isletmeId, veri) {
         `UPDATE urunler SET ad=$1, fiyat=$2, kategori=$3, gorsel=$4, aciklama=$5,
           malzemeler=$6::jsonb, alerjenler=$7::jsonb, temel_miktar=$8,
           gramaj_opsiyonu=$9::jsonb, urun_tipi=$10, boyut_secenekleri=$11::jsonb,
-          menu_yapisi=$12::jsonb, onerilen_urunler=$13::jsonb, aktif=$14, populer=$15, arsivli=false, guncelleme=NOW()
-         WHERE isletme_id=$16 AND id=$17 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
+          menu_yapisi=$12::jsonb, onerilen_urunler=$13::jsonb, aktif=$14, populer=$15,
+          stok_takibi=$16, stok_adedi=$17, arsivli=false, guncelleme=NOW()
+         WHERE isletme_id=$18 AND id=$19 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
       )
     : await pool.query(
         `INSERT INTO urunler
           (isletme_id,ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,temel_miktar,gramaj_opsiyonu,
-           urun_tipi,boyut_secenekleri,menu_yapisi,onerilen_urunler,aktif,populer,arsivli)
-         VALUES ($16,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14,$15,false) RETURNING *`, [...alanlar, tenantId]
+           urun_tipi,boyut_secenekleri,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,arsivli)
+         VALUES ($18,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14,$15,$16,$17,false) RETURNING *`, [...alanlar, tenantId]
       );
   if (!sonuc.rows.length) throw new Error("Ürün bulunamadı veya arşivlenmiş.");
-  return urunDonustur(sonuc.rows[0]);
+  return urunDonustur(sonuc.rows[0], { stokDetayi: true });
 }
 
 async function onerilenUrunleriDogrula(isletmeId, ham, kendiId) {
