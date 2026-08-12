@@ -14,3 +14,17 @@ test("geçersiz logo boyutu reddedilir", () => {
     /Logo boyutu/,
   );
 });
+
+test("işletme müşteri uygulamasını aydınlık veya koyu seçebilir", () => {
+  const acik = temaGirdisiniTemizle({ konsept: "cafe", gorunum: "acik" }, { konsept: "cafe", tema: {} });
+  assert.equal(acik.tema.gorunum, "acik");
+  assert.equal(temaCoz({ konsept: "cafe", tema: acik.tema }).gorunum, "acik");
+  assert.equal(temaCoz({ konsept: "cafe", tema: {} }).gorunum, "koyu");
+});
+
+test("geçersiz uygulama görünümü reddedilir", () => {
+  assert.throws(
+    () => temaGirdisiniTemizle({ konsept: "burger", gorunum: "otomatik" }, { konsept: "burger", tema: {} }),
+    /görünümü/,
+  );
+});

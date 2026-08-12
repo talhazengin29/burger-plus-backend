@@ -161,6 +161,11 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
     throw new Error("Logo boyutu %60 ile %180 arasında olmalıdır.");
   }
 
+  const gorunum = girdi.gorunum == null ? (mevcutTema.gorunum || "koyu") : String(girdi.gorunum).trim().toLowerCase();
+  if (!["koyu", "acik"].includes(gorunum)) {
+    throw new Error("Uygulama görünümü yalnızca koyu veya açık olabilir.");
+  }
+
   return {
     konsept,
     tema: {
@@ -168,6 +173,7 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
       ozelPalet: girdi.ozelPalet == null ? mevcutTema.ozelPalet === true : girdi.ozelPalet === true,
       renkler,
       metinler,
+      gorunum,
       logoOlcegi: Math.round(logoOlcegi),
       ...(tumuGorseli ? { tumuGorseli } : {}),
     },
@@ -187,6 +193,7 @@ export function temaCoz(isletme) {
     font: { ...varsayilan.font, ...(ozel.font || {}) },
     metinler: { ...varsayilan.metinler, ...(ozel.metinler || {}) },
     ozelPalet: ozel.ozelPalet === true,
+    gorunum: ozel.gorunum === "acik" ? "acik" : "koyu",
     tumuGorseli: ozel.tumuGorseli || null,
     logoOlcegi: Math.min(180, Math.max(60, Number(ozel.logoOlcegi) || 100)),
     konsept,
