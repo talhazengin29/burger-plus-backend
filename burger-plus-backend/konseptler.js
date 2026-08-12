@@ -155,6 +155,12 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
     }
   }
 
+  const logoOlcegiHam = girdi.logoOlcegi == null ? (mevcutTema.logoOlcegi ?? 100) : girdi.logoOlcegi;
+  const logoOlcegi = Number(logoOlcegiHam);
+  if (!Number.isFinite(logoOlcegi) || logoOlcegi < 60 || logoOlcegi > 180) {
+    throw new Error("Logo boyutu %60 ile %180 arasında olmalıdır.");
+  }
+
   return {
     konsept,
     tema: {
@@ -162,6 +168,7 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
       ozelPalet: girdi.ozelPalet == null ? mevcutTema.ozelPalet === true : girdi.ozelPalet === true,
       renkler,
       metinler,
+      logoOlcegi: Math.round(logoOlcegi),
       ...(tumuGorseli ? { tumuGorseli } : {}),
     },
   };
@@ -181,6 +188,7 @@ export function temaCoz(isletme) {
     metinler: { ...varsayilan.metinler, ...(ozel.metinler || {}) },
     ozelPalet: ozel.ozelPalet === true,
     tumuGorseli: ozel.tumuGorseli || null,
+    logoOlcegi: Math.min(180, Math.max(60, Number(ozel.logoOlcegi) || 100)),
     konsept,
     // Sıra önemli: işletmenin kendi yüklediği logo her zaman önce gelir,
     // yoksa konseptin varsayılan logosuna düşülür.
