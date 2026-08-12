@@ -165,7 +165,7 @@ export async function girisYap(isletmeId, { email, sifre } = {}) {
   }
 
   const dogruMu = await bcrypt.compare(sifre, kullanici.sifre_hash);
-  if (!dogruMu) {
+  if (!dogruMu || kullanici.rol === "pasif") {
     return { hata: "E-posta veya şifre hatalı." };
   }
 

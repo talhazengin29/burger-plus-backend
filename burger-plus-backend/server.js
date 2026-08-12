@@ -108,7 +108,7 @@ import {
   superIsletmeSilmeOzeti, superIsletmeyiYumusakSil, platformOzetiniGetir,
   ciroRaporunuGetir, buyumeRaporunuGetir, siparisRaporunuGetir, kullaniciRaporunuGetir,
   abonelikleriGetir, abonelikOlustur, abonelikGuncelle, gelirRaporunuGetir,
-  isletmeAdminleriniGetir, isletmeAdminHesabiniAyarla,
+  isletmeAdminleriniGetir, isletmeAdminHesabiniAyarla, isletmeAdmininiGuncelle, isletmeAdmininiSil,
 } from "./superAdminDb.js";
 import { sablonuGetir, slugOlustur } from "./sablonlar.js";
 import { isletmeKurulumunuYap, slugMusaitlikDurumu } from "./kurulumDb.js";
@@ -815,6 +815,20 @@ app.post("/api/super/isletmeler/:id/admin", superAdmin, guvenli(async (req, res)
   res.locals.denetimIslemi = sonuc.olusturuldu ? "isletme-admin-olusturma" : "isletme-admin-sifre-yenileme";
   // Şifre denetim günlüğüne yazılmaz; denetimIcinTemizle zaten maskeliyor.
   res.locals.denetimDetay = { adminEmail: sonuc.admin.email };
+  return sonuc;
+}));
+app.put("/api/super/isletmeler/:id/admin/:adminId", superAdmin, guvenli(async (req, res) => {
+  const sonuc = await isletmeAdmininiGuncelle(req.params.id, req.params.adminId, req.body || {});
+  res.locals.hedefIsletmeId = Number(req.params.id);
+  res.locals.denetimIslemi = "isletme-admin-guncelleme";
+  res.locals.denetimDetay = { adminId: Number(req.params.adminId), adminEmail: sonuc.admin.email, sifreYenilendi: sonuc.sifreYenilendi };
+  return sonuc;
+}));
+app.delete("/api/super/isletmeler/:id/admin/:adminId", superAdmin, guvenli(async (req, res) => {
+  const sonuc = await isletmeAdmininiSil(req.params.id, req.params.adminId);
+  res.locals.hedefIsletmeId = Number(req.params.id);
+  res.locals.denetimIslemi = "isletme-admin-silme";
+  res.locals.denetimDetay = { adminId: sonuc.adminId, adminEmail: sonuc.email };
   return sonuc;
 }));
 

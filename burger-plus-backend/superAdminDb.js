@@ -331,6 +331,55 @@ export async function isletmeAdminHesabiniAyarla(isletmeId, veri = {}) {
   }
 }
 
+export async function isletmeAdmininiGuncelle(isletmeId, adminId, veri = {}) {
+  const id = idDogrula(isletmeId, "isletmeId");
+  const yoneticiId = idDogrula(adminId, "adminId");
+  const ad = metin(veri.ad, 60);
+  const soyad = metin(veri.soyad, 60);
+  const email = metin(veri.email, 254).toLowerCase();
+  const sifre = String(veri.sifre || "");
+  if (!ad || !soyad) throw new Error("Yönetici adı ve soyadı zorunludur.");
+  if (!emailGecerli(email)) throw new Error("Yönetici e-postası geçersiz.");
+  if (sifre && (sifre.length < 8 || sifre.length > 72)) throw new Error("Şifre 8-72 karakter olmalıdır.");
+  if (/[\r\n\t]/.test(sifre)) throw new Error("Şifre satır sonu veya sekme içeremez.");
+
+  const sifreHash = sifre ? await bcrypt.hash(sifre, 12) : null;
+  try {
+    const sonuc = await pool.query(
+      `UPDATE kullanicilar
+          SET ad=$3, soyad=$4, email=$5,
+              sifre_hash=CASE WHEN $6::text IS NULL THEN sifre_hash ELSE $6 END,
+              sifre_degistirmeli=CASE WHEN $6::text IS NULL THEN sifre_degistirmeli ELSE true END,
+              sifre_gecici_metin=CASE WHEN $6::text IS NULL THEN sifre_gecici_metin ELSE $7 END,
+              sifre_degisim_tarihi=NOW()
+        WHERE isletme_id=$1 AND id=$2 AND rol='admin'
+        RETURNING id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi,sifre_degistirmeli,sifre_gecici_metin`,
+      [id, yoneticiId, ad, soyad, email, sifreHash, sifre || null]
+    );
+    if (!sonuc.rows.length) throw new Error("İşletme yöneticisi bulunamadı.");
+    return { admin: adminDonustur(sonuc.rows[0]), sifreYenilendi: Boolean(sifre) };
+  } catch (hata) {
+    if (hata?.code === "23505") throw new Error("Bu e-posta bu işletmede zaten kullanılıyor.");
+    throw hata;
+  }
+}
+
+export async function isletmeAdmininiSil(isletmeId, adminId) {
+  const id = idDogrula(isletmeId, "isletmeId");
+  const yoneticiId = idDogrula(adminId, "adminId");
+  const sonuc = await pool.query(
+    `UPDATE kullanicilar
+        SET rol='pasif', sifre_degisim_tarihi=NOW(), sifre_degistirmeli=false,
+            sifre_gecici_metin=NULL, iki_faktor_aktif=false, iki_faktor_sir=NULL,
+            iki_faktor_bekleyen_sir=NULL, iki_faktor_kurtarma='[]'::jsonb
+      WHERE isletme_id=$1 AND id=$2 AND rol='admin'
+      RETURNING id,email`,
+    [id, yoneticiId]
+  );
+  if (!sonuc.rows.length) throw new Error("İşletme yöneticisi bulunamadı.");
+  return { basarili: true, adminId: Number(sonuc.rows[0].id), email: sonuc.rows[0].email };
+}
+
 export async function superIsletmeBilgileriniGuncelle(id, veri = {}, veritabani = pool) {
   const isletmeId = idDogrula(id, "isletmeId");
   const mevcut = await veritabani.query("SELECT * FROM isletmeler WHERE id=$1", [isletmeId]);
