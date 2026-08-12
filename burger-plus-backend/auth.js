@@ -6,6 +6,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { randomBytes, createHash } from "crypto";
+import { masaTokeniUret, masaTokeniniDogrula } from "./masaErisim.js";
 import {
   kullaniciOlustur,
   kullaniciBulEmail,
@@ -46,11 +47,40 @@ if (!URETIM && !process.env.JWT_SECRET) {
 const TOKEN_SURESI = "7d"; // token 7 gun gecerli
 const SUPER_ADMIN_TOKEN_SURESI = "24h";
 const GECERSIZ_SUPER_ADMIN_HASH = "$2b$12$7nAOjall2JqSd9pzkW56TuM2l80iSQxxj1E.blcyle8ZFkGtHhwVm";
+const MASA_TOKEN_SECRET = String(process.env.MASA_TOKEN_SECRET || JWT_SECRET);
+if (MASA_TOKEN_SECRET.length < 32) {
+  throw new Error("MASA_TOKEN_SECRET en az 32 karakter olmali.");
+}
 
 function isletmeIdZorunlu(isletmeId) {
   const id = Number(isletmeId);
   if (!Number.isSafeInteger(id) || id < 1) throw new Error("isletmeId zorunlu");
   return id;
+}
+
+function masaNoZorunlu(masaNo) {
+  const deger = String(masaNo || "").trim();
+  if (!/^[A-Za-z0-9_-]{1,30}$/.test(deger)) throw new Error("Gecerli masa numarasi zorunlu");
+  return deger;
+}
+
+// Basili QR kodlari uzun omurlu oldugu icin masa erisimi sureli bir kullanici
+// oturumu degildir. JWT_SECRET ile uretilen bu HMAC, masa numarasinin tahmin
+// edilmesini yetersiz kilar; sir yalnizca QR kodunun icinde bulunur.
+export function masaErisimTokeniUret(isletmeId, masaNo) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const temizMasaNo = masaNoZorunlu(masaNo);
+  return masaTokeniUret(MASA_TOKEN_SECRET, tenantId, temizMasaNo);
+}
+
+export function masaErisimTokeniniDogrula(token, isletmeId, masaNo) {
+  try {
+    const tenantId = isletmeIdZorunlu(isletmeId);
+    const temizMasaNo = masaNoZorunlu(masaNo);
+    return masaTokeniniDogrula(MASA_TOKEN_SECRET, token, tenantId, temizMasaNo);
+  } catch {
+    return false;
+  }
 }
 
 // Basit e-posta bicim kontrolu

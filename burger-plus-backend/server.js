@@ -25,6 +25,7 @@ import pool, {
   odemeTaslagiOlustur,
   odemeSimulasyonOnayla,
   odemeIyzicoOlarakOnayla,
+  odemeCuzdanlaOnayla,
   odemeGetir,
   odemeSaglayiciTokenKaydet,
   odemeSaglayiciTokeniniGetir,
@@ -85,11 +86,17 @@ import {
   ikiFaktorKurulumOnayla, ikiFaktorDevreDisiBirak,
   superAdminGiris, superAdminIkiFaktorGirisiniTamamla, superAdminMiddleware,
   superAdminErisimTokeniUret, impersonationTokeniniDogrula,
+  masaErisimTokeniUret, masaErisimTokeniniDogrula,
 } from "./auth.js";
 import {
   sadakatTablolariHazirla, sadakatOzetiniGetir, puanlaOdulSatinAl,
   kullaniciOdulunuSipariseDonustur, adminOdulleriGetir, adminOdulKaydet, adminOdulArsivle,
+  sadakatAyariniGetir, adminSadakatAyariniGetir, adminSadakatAyariniKaydet,
 } from "./sadakatDb.js";
+import {
+  cuzdanTablolariHazirla, cuzdanAyariniGetir, adminCuzdanAyariniKaydet,
+  cuzdanOzetiniGetir, kasaMusteriAra, kasaSonYuklemeleriGetir, kasadanCuzdanYukle, adminCuzdanRaporunuGetir,
+} from "./cuzdanDb.js";
 import {
   isletmeTablosunuHazirla, isletmeMigrationunuCalistir, isletmeSlugIleGetir, isletmeIdIleGetir,
   isletmeOlustur, isletmeTemasiniGuncelle, isletmeLogosunuGuncelle,
@@ -143,7 +150,7 @@ const corsAyarlari = {
     callback(hata);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Isletme"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Isletme", "X-Masa-Token"],
 };
 // İyzico'nun ödeme sayfası callback'i tarayıcıdan otomatik form-post ile
 // gönderir; bu istek kendi domainini Origin header'ında taşır ve frontend
@@ -354,6 +361,14 @@ app.get("/api/sadakat", korumaliMiddleware(), async (req, res) => {
   }
 });
 
+app.get("/api/cuzdan", korumaliMiddleware(), async (req, res) => {
+  try {
+    res.json({ cuzdan: await cuzdanOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "Cüzdan bilgileri alınamadı." });
+  }
+});
+
 app.post("/api/sadakat/oduller/:id/satin-al", korumaliMiddleware(), async (req, res) => {
   try {
     await puanlaOdulSatinAl(req.isletme.id, pool, req.kullanici.id, req.params.id, req.body?.istekAnahtari);
@@ -382,6 +397,9 @@ app.post("/api/sadakat/hediyeler/:id/kullan", korumaliMiddleware(), async (req, 
 app.get("/api/masa/:masaNo", async (req, res) => {
   const masaNo = guvenliMasaNo(req.params.masaNo);
   if (!masaNo) return res.status(400).json({ hata: "Masa numarasi gecersiz." });
+  if (!masaErisimTokeniniDogrula(req.headers["x-masa-token"], req.isletme.id, masaNo)) {
+    return res.status(403).json({ hata: "Masa QR erisimi gecersiz." });
+  }
   res.json(await masaSiparisleriniGetir(req.isletme.id, masaNo));
 });
 
@@ -405,6 +423,9 @@ app.get("/api/duyurular", async (req, res) => {
   res.json({ duyurular: await duyurulariGetir(req.isletme.id) });
 });
 app.get("/api/kampanyalar", async (req, res) => { res.json({ kampanyalar: await kampanyalariGetir(req.isletme.id) }); });
+app.get("/api/sadakat-ayari", async (req, res) => {
+  res.json({ damgaKarti: await sadakatAyariniGetir(req.isletme.id, pool) });
+});
 
 // Ödeme sağlayıcısı bağlanmadan önce de sipariş ve tutar backend'de güvenli
 // taslak olarak hazırlanır. İyzico entegrasyonunda yalnızca onay endpointi
@@ -439,6 +460,19 @@ app.post("/api/odeme/:id/simulasyon-onay", opsiyonelKullaniciMiddleware(), async
     res.json({ odeme: { ...odeme, mutfagaAktarildi: true } });
   } catch (e) {
     res.status(400).json({ hata: e.message || "Test ödemesi onaylanamadı." });
+  }
+});
+
+app.post("/api/odeme/:id/cuzdan-onay", korumaliMiddleware(), async (req, res) => {
+  try {
+    const ayar = await cuzdanAyariniGetir(req.isletme.id, pool);
+    if (!ayar.aktif) return res.status(403).json({ hata: "Cüzdan ödemeleri şu anda kullanılamıyor." });
+    const sonuc = await odemeCuzdanlaOnayla(req.isletme.id, req.params.id, req.kullanici.id);
+    const odeme = sonuc.odeme;
+    await onaylananOdemeyiMutfagaAktar(odeme);
+    res.json({ odeme: { ...odeme, mutfagaAktarildi: true }, cuzdan: await cuzdanOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
+  } catch (e) {
+    res.status(400).json({ hata: e.message || "Cüzdan ödemesi tamamlanamadı." });
   }
 });
 
@@ -576,9 +610,14 @@ const nakitDegisikliginiYayinla = (tenantId, masaNo, siparis = null) => {
   }
 };
 
-app.get("/api/nakit/masa/:masaNo/durum", guvenli(async (req) => (
-  nakitMasaDurumunuGetir(req.isletme.id, req.params.masaNo)
-)));
+app.get("/api/nakit/masa/:masaNo/durum", guvenli(async (req, res) => {
+  const masaNo = guvenliMasaNo(req.params.masaNo);
+  if (!masaNo) return res.status(400).json({ hata: "Masa numarasi gecersiz." });
+  if (!masaErisimTokeniniDogrula(req.headers["x-masa-token"], req.isletme.id, masaNo)) {
+    return res.status(403).json({ hata: "Masa QR erisimi gecersiz." });
+  }
+  return nakitMasaDurumunuGetir(req.isletme.id, masaNo);
+}));
 
 app.post("/api/nakit/siparis", nakitSiparisLimiti, opsiyonelKullaniciMiddleware(), guvenli(async (req, res) => {
   const kullanici = req.kullanici || null;
@@ -621,6 +660,23 @@ app.post("/api/nakit/siparis/:id/tahsil", salonRolu(), guvenli(async (req) => {
   const siparis = sonuc.odeme;
   nakitDegisikliginiYayinla(req.isletme.id, siparis.masaNo, siparis);
   return { siparis };
+}));
+
+app.get("/api/kasa/cuzdan/musteriler", salonRolu(), guvenli(async (req) => ({
+  musteriler: await kasaMusteriAra(req.isletme.id, pool, req.query.q),
+})));
+
+app.get("/api/kasa/cuzdan/son-yuklemeler", salonRolu(), guvenli(async (req) => ({
+  yuklemeler: await kasaSonYuklemeleriGetir(req.isletme.id, pool),
+  ayar: await cuzdanAyariniGetir(req.isletme.id, pool),
+})));
+
+app.post("/api/kasa/cuzdan/yukle", salonRolu(), guvenli(async (req) => {
+  const t = req.isletme.id;
+  const yukleme = await kasadanCuzdanYukle(t, pool, req.kullanici.id, req.body || {});
+  io.to(oda(t, "genel")).emit("cuzdan-guncellendi", { kullaniciId: Number(req.body?.kullaniciId), bakiye: yukleme.bakiye });
+  io.to(oda(t, "salon")).emit("cuzdan-kasa-guncellendi", { kullaniciId: Number(req.body?.kullaniciId) });
+  return { yukleme };
 }));
 
 const superAdmin = superAdminMiddleware();
@@ -792,6 +848,19 @@ app.post("/api/super/isletmeler/:id/erisim-tokeni", superAdmin, guvenli(async (r
   res.locals.denetimDetay = { slug: isletme.slug, sureDakika: 30 };
   return { token, sonGecerlilikDakika: 30, isletme: { id: isletme.id, slug: isletme.slug, ad: isletme.ad } };
 }));
+app.post("/api/super/isletmeler/:id/masa-erisim-tokenlari", superAdmin, guvenli(async (req, res) => {
+  const isletme = await superIsletmeDetayiGetir(req.params.id);
+  if (!isletme || isletme.silinmeTarihi) throw new Error("Isletme bulunamadi veya silinmek uzere isaretli.");
+  const adet = Math.min(500, Math.max(1, Number(req.body?.masaSayisi) || Number(isletme.masaSayisi) || 10));
+  res.locals.hedefIsletmeId = isletme.id;
+  res.locals.denetimIslemi = "masa-qr-tokenlari-uretme";
+  return {
+    tokenlar: Array.from({ length: adet }, (_, indeks) => {
+      const masaNo = String(indeks + 1);
+      return { masaNo, token: masaErisimTokeniUret(isletme.id, masaNo) };
+    }),
+  };
+}));
 app.get("/api/super/kayitlar", superAdmin, guvenli(async (req) => ({
   kayitlar: await superAdminKayitlariniGetir({
     limit: req.query.limit, islem: req.query.islem, isletmeId: req.query.isletmeId,
@@ -818,6 +887,15 @@ app.use("/api/admin", (req, res, next) => {
 app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
 app.get("/api/admin/ben", admin, (req, res) => res.json({ kullanici: req.kullanici, impersonation: req.impersonation || null }));
 app.get("/api/admin/kurulum-ayarlari", admin, guvenli((req) => kurulumAyarlariGetir(req.isletme.id)));
+app.post("/api/admin/masa-erisim-tokenlari", admin, guvenli(async (req) => {
+  const adet = Math.min(500, Math.max(1, Number(req.body?.masaSayisi) || 10));
+  return {
+    tokenlar: Array.from({ length: adet }, (_, indeks) => {
+      const masaNo = String(indeks + 1);
+      return { masaNo, token: masaErisimTokeniUret(req.isletme.id, masaNo) };
+    }),
+  };
+}));
 app.put("/api/admin/tema", admin, guvenli(async (req) => {
   const isletme = await isletmeTemasiniGuncelle(req.isletme.id, req.body || {});
   const yanit = temaliIsletmeYaniti(isletme);
@@ -950,6 +1028,31 @@ app.delete("/api/admin/kampanyalar/:id", admin, guvenli(async (req) => {
   io.to(oda(t, "genel")).emit("kampanyalar-guncellendi", await kampanyalariGetir(t));
 }));
 app.get("/api/admin/oduller", admin, guvenli(async (req) => ({ oduller: await adminOdulleriGetir(req.isletme.id, pool) })));
+app.get("/api/admin/sadakat-ayari", admin, guvenli(async (req) => ({ damgaKarti: await adminSadakatAyariniGetir(req.isletme.id, pool) })));
+app.put("/api/admin/sadakat-ayari", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const eski = await adminSadakatAyariniGetir(t, pool);
+  const damgaKarti = await adminSadakatAyariniKaydet(t, pool, req.body || {});
+  await revizyonKaydet(t, {
+    yapan: req.kullanici, varlikTuru: "sadakat", varlikId: null, islem: "guncelleme",
+    aciklama: `Damga kartı ${damgaKarti.aktif ? "güncellendi" : "duraklatıldı"}.`, eskiDeger: eski, yeniDeger: damgaKarti,
+  });
+  io.to(oda(t, "genel")).emit("sadakat-ayari-guncellendi", damgaKarti);
+  return { damgaKarti };
+}));
+app.get("/api/admin/cuzdan-ayari", admin, guvenli(async (req) => ({ cuzdanAyari: await cuzdanAyariniGetir(req.isletme.id, pool) })));
+app.get("/api/admin/cuzdan-raporu", admin, guvenli(async (req) => ({ cuzdanRaporu: await adminCuzdanRaporunuGetir(req.isletme.id, pool) })));
+app.put("/api/admin/cuzdan-ayari", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const eski = await cuzdanAyariniGetir(t, pool);
+  const cuzdanAyari = await adminCuzdanAyariniKaydet(t, pool, req.body || {});
+  await revizyonKaydet(t, {
+    yapan: req.kullanici, varlikTuru: "cuzdan", varlikId: null, islem: "guncelleme",
+    aciklama: `Cüzdan programı ${cuzdanAyari.aktif ? "güncellendi" : "duraklatıldı"}.`, eskiDeger: eski, yeniDeger: cuzdanAyari,
+  });
+  io.to(oda(t, "genel")).emit("cuzdan-ayari-guncellendi", cuzdanAyari);
+  return { cuzdanAyari };
+}));
 app.post("/api/admin/oduller", admin, guvenli(async (req) => {
   const t = req.isletme.id;
   const eski = req.body.id ? await yonetimVarliginiGetir(t, "odul", req.body.id) : null;
@@ -1074,13 +1177,19 @@ io.on("connection", (socket) => {
   console.log("Baglandi:", socket.id);
   socket.join(oda(socket.data.isletmeId, "genel"));
 
-  socket.on("masaya-katil", async (gelenMasaNo) => {
+  socket.on("masaya-katil", async (gelen, tamamlandi) => {
     const tenantId = socket.data.isletmeId;
-    const masaNo = guvenliMasaNo(gelenMasaNo);
-    if (!masaNo) return;
+    const masaNo = guvenliMasaNo(typeof gelen === "object" ? gelen?.masaNo : gelen);
+    const masaToken = typeof gelen === "object" ? gelen?.masaToken : "";
+    const personelErisimi = socketRoluVar(socket, ["mutfak", "salon", "kasiyer"]);
+    if (!masaNo || (!personelErisimi && !masaErisimTokeniniDogrula(masaToken, tenantId, masaNo))) {
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: "Masa QR erisimi gecersiz." });
+      return;
+    }
     socket.join(oda(tenantId, `masa-${masaNo}`));
     socket.emit("masa-guncellendi", await masaSiparisleriniGetir(tenantId, masaNo));
     socket.emit("nakit-masa-guncellendi", await nakitMasaDurumunuGetir(tenantId, masaNo));
+    if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
     console.log(`${socket.id} -> ${oda(tenantId, `masa-${masaNo}`)}`);
   });
 
@@ -1212,6 +1321,7 @@ isletmeTablosunuHazirla()
   })
   .then(() => adminTablolariHazirla(varsayilanIsletmeId))
   .then(() => sadakatTablolariHazirla(varsayilanIsletmeId, pool))
+  .then(() => cuzdanTablolariHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
   .then(() => ilkSuperAdminiHazirla())

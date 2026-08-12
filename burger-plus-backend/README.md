@@ -56,8 +56,14 @@ Müşteri: `masaya-katil`(masaNo), `urun-ekle`({masaNo,urun,kisiAdi}) · dinle: 
 Mutfak: `mutfaga-katil`, `masa-durum-degistir`({masaNo,durum}) · dinle: `mutfak-guncellendi`
 
 ## HTTP API
-- `GET /api/masa/:masaNo` → bir masanın siparişi
+- `GET /api/masa/:masaNo` → bir masanın siparişi (`X-Masa-Token` başlığı zorunlu)
 - `GET /api/mutfak` → tüm açık masalar
+
+Masa numarası tek başına erişim sağlamaz. İşletme admini veya super admin
+tarafından üretilen QR kodu, işletme ve masa numarasına bağlı imzalı bir erişim
+anahtarı taşır. Eski `?no=3` biçimindeki QR kodları geçersizdir ve yeniden
+üretilmelidir. `MASA_TOKEN_SECRET` değiştirildiğinde basılı QR kodları da yeniden
+üretilmelidir.
 
 ## Veritabanı tabloları
 - **oturumlar**: her aktif masa bir oturum (id, masa_no, durum)

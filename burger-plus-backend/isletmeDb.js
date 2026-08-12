@@ -10,6 +10,7 @@ const TENANT_TABLOLARI = [
   "oduller",
   "kullanici_odulleri",
   "puan_hareketleri",
+  "cuzdan_hareketleri",
   "davet_odulleri",
   "personeller",
   "vardiyalar",

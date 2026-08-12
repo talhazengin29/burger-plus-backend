@@ -11,7 +11,7 @@ function isletmeIdZorunlu(isletmeId) {
   return id;
 }
 
-async function sadakatAyariniGetir(isletmeId, veritabani) {
+export async function sadakatAyariniGetir(isletmeId, veritabani) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await veritabani.query(
     "SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='sadakat_kurulum_v1'",
@@ -19,11 +19,90 @@ async function sadakatAyariniGetir(isletmeId, veritabani) {
   );
   const ayar = sonuc.rows[0]?.deger || {};
   const hedef = Number(ayar.hedefAdet);
+  const odulUrunId = Number(ayar.odulUrunId);
   return {
+    aktif: ayar.aktif !== false,
     hedefAdet: Number.isInteger(hedef) && hedef >= 2 && hedef <= 100 ? hedef : BURGER_DAMGA_HEDEFI,
     kategori: String(ayar.kategori || "Burgerler").trim().slice(0, 100) || "Burgerler",
     odulMetni: String(ayar.odulMetni || "1 Burger Hediye").trim().slice(0, 120) || "1 Burger Hediye",
+    odulUrunId: Number.isSafeInteger(odulUrunId) && odulUrunId > 0 ? odulUrunId : null,
+    odulKodu: String(ayar.odulKodu || "ye-kazan-burger").trim().slice(0, 100) || "ye-kazan-burger",
+    kartEtiketi: String(ayar.kartEtiketi || "YE KAZAN").trim().slice(0, 40) || "YE KAZAN",
+    baslik: String(ayar.baslik || "Lezzet yolculuğun").trim().slice(0, 100) || "Lezzet yolculuğun",
+    aciklama: String(ayar.aciklama || "Her uygun üründe bir damga kazan, kartını tamamla ve hediyeni kap.").trim().slice(0, 240),
+    damgaBirimi: String(ayar.damgaBirimi || "ürün").trim().slice(0, 40) || "ürün",
+    tamamlanmaMetni: String(ayar.tamamlanmaMetni || "Hediyen hazır!").trim().slice(0, 80) || "Hediyen hazır!",
+    ikon: String(ayar.ikon || "★").trim().slice(0, 16) || "★",
   };
+}
+
+export async function adminSadakatAyariniGetir(isletmeId, pool) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  let ayar = await sadakatAyariniGetir(tenantId, pool);
+  if (!ayar.odulUrunId) {
+    const mevcutOdul = await pool.query("SELECT urun_id FROM oduller WHERE isletme_id=$1 AND kod=$2 AND arsivli=false LIMIT 1", [tenantId, ayar.odulKodu]);
+    if (mevcutOdul.rows[0]) ayar = { ...ayar, odulUrunId: Number(mevcutOdul.rows[0].urun_id) };
+  }
+  let odulUrun = null;
+  if (ayar.odulUrunId) {
+    const sonuc = await pool.query("SELECT id,ad,gorsel,aktif,arsivli FROM urunler WHERE isletme_id=$1 AND id=$2", [tenantId, ayar.odulUrunId]);
+    const satir = sonuc.rows[0];
+    if (satir) odulUrun = { id: Number(satir.id), ad: satir.ad, gorsel: satir.gorsel || null, aktif: satir.aktif && !satir.arsivli };
+  }
+  return { ...ayar, odulUrun };
+}
+
+export async function adminSadakatAyariniKaydet(isletmeId, pool, veri) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const hedefAdet = Math.floor(Number(veri?.hedefAdet));
+  const kategori = String(veri?.kategori || "").trim().slice(0, 100);
+  const odulUrunId = Number(veri?.odulUrunId);
+  const aktif = veri?.aktif !== false;
+  if (!Number.isInteger(hedefAdet) || hedefAdet < 2 || hedefAdet > 30) throw new Error("Damga hedefi 2 ile 30 arasında olmalıdır.");
+  if (!kategori) throw new Error("Damga kazandıracak kategori zorunludur.");
+  const urun = await pool.query("SELECT id,ad,gorsel FROM urunler WHERE isletme_id=$1 AND id=$2 AND aktif=true AND arsivli=false", [tenantId, odulUrunId]);
+  if (aktif && !urun.rows.length) throw new Error("Aktif damga kartı için yayındaki bir ödül ürünü seçin.");
+  const mevcutAyar = await sadakatAyariniGetir(tenantId, pool);
+  let odulKodu = mevcutAyar.odulKodu;
+  if (aktif && mevcutAyar.odulUrunId && mevcutAyar.odulUrunId !== odulUrunId) {
+    const kazanilmis = await pool.query(
+      `SELECT COUNT(*)::int AS adet FROM kullanici_odulleri ko
+       JOIN oduller o ON o.isletme_id=$1 AND o.id=ko.odul_id
+       WHERE ko.isletme_id=$1 AND o.kod=$2`,
+      [tenantId, odulKodu]
+    );
+    if (Number(kazanilmis.rows[0]?.adet || 0) > 0) odulKodu = `ye-kazan-${randomUUID()}`;
+  }
+  const ayar = {
+    aktif, hedefAdet, kategori,
+    odulUrunId: urun.rows.length ? odulUrunId : null,
+    odulKodu,
+    odulMetni: String(veri?.odulMetni || "").trim().slice(0, 120) || (urun.rows[0] ? `1 ${urun.rows[0].ad} Hediye` : "Hediye"),
+    kartEtiketi: String(veri?.kartEtiketi || "").trim().slice(0, 40) || "YE KAZAN",
+    baslik: String(veri?.baslik || "").trim().slice(0, 100) || "Lezzet yolculuğun",
+    aciklama: String(veri?.aciklama || "").trim().slice(0, 240),
+    damgaBirimi: String(veri?.damgaBirimi || "").trim().slice(0, 40) || "ürün",
+    tamamlanmaMetni: String(veri?.tamamlanmaMetni || "").trim().slice(0, 80) || "Hediyen hazır!",
+    ikon: String(veri?.ikon || "").trim().slice(0, 16) || "★",
+  };
+  const baglanti = await pool.connect();
+  try {
+    await baglanti.query("BEGIN");
+    await baglanti.query(
+      `INSERT INTO sistem_ayarlari (isletme_id,anahtar,deger,guncelleme)
+       VALUES ($1,'sadakat_kurulum_v1',$2::jsonb,NOW())
+       ON CONFLICT (isletme_id,anahtar) DO UPDATE SET deger=EXCLUDED.deger,guncelleme=NOW()`,
+      [tenantId, JSON.stringify(ayar)]
+    );
+    if (aktif && urun.rows.length) await yeKazanOdulunuBulVeyaOlustur(tenantId, baglanti, odulUrunId);
+    await baglanti.query("COMMIT");
+  } catch (hata) {
+    await baglanti.query("ROLLBACK");
+    throw hata;
+  } finally {
+    baglanti.release();
+  }
+  return adminSadakatAyariniGetir(tenantId, pool);
 }
 
 async function yeKazanOdulunuBulVeyaOlustur(isletmeId, baglanti, tercihEdilenUrunId = null) {
@@ -32,24 +111,29 @@ async function yeKazanOdulunuBulVeyaOlustur(isletmeId, baglanti, tercihEdilenUru
   const mevcut = await baglanti.query(
     `SELECT o.id FROM oduller o
      JOIN urunler u ON u.isletme_id=$1 AND u.id=o.urun_id
-     WHERE o.isletme_id=$1 AND o.kod='ye-kazan-burger'
+     WHERE o.isletme_id=$1 AND o.kod=$2
        AND u.aktif=true AND u.arsivli=false
      LIMIT 1`,
-    [tenantId]
+    [tenantId, sadakat.odulKodu]
   );
   if (mevcut.rows.length) {
+    const guncelUrunId = Number(sadakat.odulUrunId || tercihEdilenUrunId);
     await baglanti.query(
-      "UPDATE oduller SET ad=$3,aktif=true,arsivli=false,market_aktif=false,guncelleme=NOW() WHERE isletme_id=$1 AND id=$2",
-      [tenantId, mevcut.rows[0].id, sadakat.odulMetni]
+      `UPDATE oduller SET ad=$3,
+         urun_id=COALESCE($4::int,urun_id),
+         gorsel=COALESCE((SELECT gorsel FROM urunler WHERE isletme_id=$1 AND id=$4::int),gorsel),
+         aktif=true,arsivli=false,market_aktif=false,guncelleme=NOW()
+       WHERE isletme_id=$1 AND id=$2`,
+      [tenantId, mevcut.rows[0].id, sadakat.odulMetni, Number.isSafeInteger(guncelUrunId) && guncelUrunId > 0 ? guncelUrunId : null]
     );
     return Number(mevcut.rows[0].id);
   }
 
-  const tercihId = Number(tercihEdilenUrunId);
+  const tercihId = Number(sadakat.odulUrunId || tercihEdilenUrunId);
   const urun = await baglanti.query(
     `SELECT id,gorsel FROM urunler
-     WHERE isletme_id=$1 AND kategori=$2 AND aktif=true AND arsivli=false
-       AND ($3::int IS NULL OR id=$3)
+     WHERE isletme_id=$1 AND aktif=true AND arsivli=false
+       AND (($3::int IS NOT NULL AND id=$3) OR ($3::int IS NULL AND kategori=$2))
      ORDER BY id LIMIT 1`,
     [tenantId, sadakat.kategori, Number.isSafeInteger(tercihId) && tercihId > 0 ? tercihId : null]
   );
@@ -64,12 +148,12 @@ async function yeKazanOdulunuBulVeyaOlustur(isletmeId, baglanti, tercihEdilenUru
   const sonuc = await baglanti.query(
     `INSERT INTO oduller
       (isletme_id,kod,ad,puan,urun_id,gorsel,market_aktif,aktif,arsivli)
-     VALUES ($1,'ye-kazan-burger',$4,0,$2,$3,false,true,false)
+     VALUES ($1,$5,$4,0,$2,$3,false,true,false)
      ON CONFLICT (isletme_id,kod) DO UPDATE SET
        urun_id=EXCLUDED.urun_id,gorsel=EXCLUDED.gorsel,
        market_aktif=false,aktif=true,arsivli=false,guncelleme=NOW()
      RETURNING id`,
-    [tenantId, secilenUrun.id, secilenUrun.gorsel || null, sadakat.odulMetni]
+    [tenantId, secilenUrun.id, secilenUrun.gorsel || null, sadakat.odulMetni, sadakat.odulKodu]
   );
   return Number(sonuc.rows[0].id);
 }
@@ -261,6 +345,7 @@ export async function sadakatOzetiniGetir(isletmeId, pool, kullaniciId) {
     puan: Number(kullanici.rows[0].puan || 0),
     burgerDamga: Number(kullanici.rows[0].burger_damga || 0),
     burgerDamgaHedef: sadakat.hedefAdet,
+    damgaKarti: sadakat,
     oduller: oduller.rows.map(oduluDonustur),
     puanGecmisi: hareketler.rows.map((hareket) => ({
       id: Number(hareket.id),
@@ -360,6 +445,10 @@ export async function odemeSadakatiniUygula(isletmeId, baglanti, odeme) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sadakat = await sadakatAyariniGetir(tenantId, baglanti);
   if (!odeme.kullanici_id) return { burgerDamga: null, kazanilanHediye: 0 };
+  if (!sadakat.aktif) {
+    const mevcut = await baglanti.query("SELECT burger_damga FROM kullanicilar WHERE isletme_id=$1 AND id=$2", [tenantId, odeme.kullanici_id]);
+    return { burgerDamga: Number(mevcut.rows[0]?.burger_damga || 0), kazanilanHediye: 0 };
+  }
   const burgerAdet = (Array.isArray(odeme.urunler) ? odeme.urunler : [])
     .filter((urun) => urun.kategori === sadakat.kategori)
     .reduce((toplam, urun) => toplam + Math.max(1, Number(urun.adet || 1)), 0);

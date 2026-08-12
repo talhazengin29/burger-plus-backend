@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "smoke": "node pgcheck.mjs"
+    "smoke": "node pgcheck.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "keywords": [],
   "author": "",

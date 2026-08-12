@@ -935,6 +935,11 @@ export async function odemeIyzicoOlarakOnayla(isletmeId, id, token) {
   return odemeBasariliOlarakIsle(isletmeId, id, "iyzico", token, null);
 }
 
+export async function odemeCuzdanlaOnayla(isletmeId, id, kullaniciId) {
+  if (!kullaniciId) throw new Error("Cüzdan ödemesi için giriş gerekli.");
+  return odemeBasariliOlarakIsle(isletmeId, id, "cuzdan", null, kullaniciId);
+}
+
 async function odemeBasariliOlarakIsle(isletmeId, id, saglayici, saglayiciToken, kullaniciId = null, beklenenDurum = "bekliyor") {
   const tenantId = isletmeIdZorunlu(isletmeId);
   // İyzico sonucu sağlayıcıdan doğrulanmış gerçek bir tahsilattır. Kullanıcı
@@ -954,6 +959,25 @@ async function odemeBasariliOlarakIsle(isletmeId, id, saglayici, saglayiciToken,
     );
     if (sonuc.rows.length) {
       const odeme = sonuc.rows[0];
+      let guncelBakiye = null;
+      if (saglayici === "cuzdan") {
+        if (!odeme.kullanici_id) throw new Error("Cüzdan ödemesi bir müşteri hesabına bağlı olmalıdır.");
+        const tutarKurus = Math.round(Number(odeme.tutar) * 100);
+        const bakiyeSonucu = await baglanti.query(
+          `UPDATE kullanicilar SET bakiye_kurus=bakiye_kurus-$1
+           WHERE isletme_id=$2 AND id=$3 AND bakiye_kurus >= $1 RETURNING bakiye_kurus`,
+          [tutarKurus, tenantId, odeme.kullanici_id]
+        );
+        if (!bakiyeSonucu.rows.length) throw new Error("Cüzdan bakiyesi bu ödeme için yetersiz.");
+        guncelBakiye = Number(bakiyeSonucu.rows[0].bakiye_kurus) / 100;
+        await baglanti.query(
+          `INSERT INTO cuzdan_hareketleri
+            (id,isletme_id,kullanici_id,tur,tutar_kurus,odeme_id,aciklama)
+           VALUES ($1,$2,$3,'cuzdan_harcama',$4,$5,$6)
+           ON CONFLICT (isletme_id,odeme_id) WHERE odeme_id IS NOT NULL DO NOTHING`,
+          [randomUUID(), tenantId, odeme.kullanici_id, -tutarKurus, odeme.id, `Sipariş ödemesi: ${odeme.siparis_no}`]
+        );
+      }
       await suresiDolanStoklariBirak(baglanti, tenantId);
       await siparisStogunuIsle(baglanti, tenantId, odeme.id, odeme.urunler, { stokAciginaIzinVer: saglayici === "iyzico" });
       let guncelPuan = null;
@@ -991,6 +1015,7 @@ async function odemeBasariliOlarakIsle(isletmeId, id, saglayici, saglayiciToken,
           burgerDamga: sadakat.burgerDamga,
           kazanilanHediye: sadakat.kazanilanHediye,
           davetOdulu,
+          guncelBakiye,
         },
         ilkOnay: true,
       };
