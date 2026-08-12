@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import sharp from "sharp";
 
 const GORSEL_TURLERI = [
   { mime: "image/png", uzanti: "png", eslesir: (veri) => veri.length >= 8 && veri.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
@@ -15,7 +16,7 @@ const SVG_TURU = {
     if (!veri.length || veri.length > 2 * 1024 * 1024 || veri.includes(0)) return false;
     const metin = veri.toString("utf8").replace(/^\uFEFF/, "").trim();
     if (!/^(?:<\?xml[^>]*>\s*)?<svg(?:\s|>)/i.test(metin)) return false;
-    return !/(?:<script|<foreignObject|<iframe|<object|<embed|<!DOCTYPE|javascript\s*:|\son[a-z]+\s*=)/i.test(metin);
+    return !/(?:<script|<foreignObject|<iframe|<object|<embed|<!DOCTYPE|javascript\s*:|\son[a-z]+\s*=|(?:href|xlink:href)\s*=\s*["']\s*(?:https?:|\/\/|file:))/i.test(metin);
   },
 };
 const LOGO_TURLERI = [...GORSEL_TURLERI.filter((tur) => ["image/png", "image/jpeg", "image/webp"].includes(tur.mime)), SVG_TURU];
@@ -102,14 +103,45 @@ export async function gorselYukle(buffer) {
   return nesneYukle(buffer, nesneYolu, gorselTuru, 5 * 1024 * 1024, "Görsel en fazla 5 MB olabilir.");
 }
 
+// Farklı oranlarda ve çevresinde görünmez/beyaz boşluk bulunan logoların
+// uygulamanın her yerinde aynı dolulukta görünmesi için ortak bir tuval üretir.
+// Çıktı 2.7:1 oranındadır; üst bar (112x45), giriş ve açılış ekranları bu
+// orana göre tasarlanmıştır. WebP şeffaflığı korur ve SVG'yi pasif görsele
+// dönüştürerek tarayıcıda aktif içerik çalıştırılması riskini de kaldırır.
+export async function logoGorseliniStandartlastir(buffer) {
+  try {
+    return await sharp(buffer, { limitInputPixels: 25_000_000, failOn: "error" })
+      .rotate()
+      .trim({ threshold: 10 })
+      .resize({
+        width: 1000,
+        height: 320,
+        fit: "contain",
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      })
+      .extend({
+        top: 40,
+        bottom: 40,
+        left: 40,
+        right: 40,
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      })
+      .webp({ lossless: true, effort: 4 })
+      .toBuffer();
+  } catch {
+    throw new Error("Logo işlenemedi. Lütfen geçerli ve bozuk olmayan bir görsel yükleyin.");
+  }
+}
+
 export async function logoYukle(buffer, isletmeId, bildirilenMime) {
   if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir logo dosyası gönderilmelidir.");
   const logoTuru = dosyaTurunuBul(buffer, LOGO_TURLERI, bildirilenMime);
   if (!logoTuru) throw new Error("Logo PNG, JPG/JPEG, WebP veya güvenli SVG formatında olmalıdır.");
   const id = Number(isletmeId);
   if (!Number.isSafeInteger(id) || id < 1) throw new Error("isletmeId zorunlu");
-  const nesneYolu = `logolar/logo_${id}_${Date.now()}.${logoTuru.uzanti}`;
-  return nesneYukle(buffer, nesneYolu, logoTuru, 2 * 1024 * 1024, "Logo en fazla 2 MB olabilir.");
+  const standartLogo = await logoGorseliniStandartlastir(buffer);
+  const nesneYolu = `logolar/logo_${id}_${Date.now()}.webp`;
+  return nesneYukle(standartLogo, nesneYolu, { mime: "image/webp" }, 2 * 1024 * 1024, "İşlenen logo en fazla 2 MB olabilir.");
 }
 
 export async function storageDosyasiniSil(publicUrl) {
