@@ -15,6 +15,28 @@ test("geçersiz logo boyutu reddedilir", () => {
   );
 });
 
+test("işletmeye özel logo konumu güvenli aralıkta saklanır ve çözülür", () => {
+  const temiz = temaGirdisiniTemizle(
+    { konsept: "burger", logoKonumX: -42, logoKonumY: 12 },
+    { konsept: "burger", tema: {} },
+  );
+  assert.equal(temiz.tema.logoKonumX, -42);
+  assert.equal(temiz.tema.logoKonumY, 12);
+  assert.equal(temaCoz({ konsept: "burger", tema: temiz.tema }).logoKonumX, -42);
+  assert.equal(temaCoz({ konsept: "burger", tema: temiz.tema }).logoKonumY, 12);
+});
+
+test("geçersiz logo konumu reddedilir", () => {
+  assert.throws(
+    () => temaGirdisiniTemizle({ konsept: "burger", logoKonumX: 81 }, { konsept: "burger", tema: {} }),
+    /yatay konumu/,
+  );
+  assert.throws(
+    () => temaGirdisiniTemizle({ konsept: "burger", logoKonumY: -31 }, { konsept: "burger", tema: {} }),
+    /dikey konumu/,
+  );
+});
+
 test("işletme müşteri uygulamasını aydınlık veya koyu seçebilir", () => {
   const acik = temaGirdisiniTemizle({ konsept: "cafe", gorunum: "acik" }, { konsept: "cafe", tema: {} });
   assert.equal(acik.tema.gorunum, "acik");

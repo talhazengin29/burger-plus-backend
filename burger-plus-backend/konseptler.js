@@ -161,6 +161,17 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
     throw new Error("Logo boyutu %60 ile %180 arasında olmalıdır.");
   }
 
+  const logoKonumXHam = girdi.logoKonumX == null ? (mevcutTema.logoKonumX ?? 0) : girdi.logoKonumX;
+  const logoKonumYHam = girdi.logoKonumY == null ? (mevcutTema.logoKonumY ?? 0) : girdi.logoKonumY;
+  const logoKonumX = Number(logoKonumXHam);
+  const logoKonumY = Number(logoKonumYHam);
+  if (!Number.isFinite(logoKonumX) || logoKonumX < -80 || logoKonumX > 80) {
+    throw new Error("Logo yatay konumu -80 ile 80 piksel arasında olmalıdır.");
+  }
+  if (!Number.isFinite(logoKonumY) || logoKonumY < -30 || logoKonumY > 30) {
+    throw new Error("Logo dikey konumu -30 ile 30 piksel arasında olmalıdır.");
+  }
+
   const gorunum = girdi.gorunum == null ? (mevcutTema.gorunum || "koyu") : String(girdi.gorunum).trim().toLowerCase();
   if (!["koyu", "acik"].includes(gorunum)) {
     throw new Error("Uygulama görünümü yalnızca koyu veya açık olabilir.");
@@ -175,6 +186,8 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
       metinler,
       gorunum,
       logoOlcegi: Math.round(logoOlcegi),
+      logoKonumX: Math.round(logoKonumX),
+      logoKonumY: Math.round(logoKonumY),
       ...(tumuGorseli ? { tumuGorseli } : {}),
     },
   };
@@ -196,6 +209,8 @@ export function temaCoz(isletme) {
     gorunum: ozel.gorunum === "acik" ? "acik" : "koyu",
     tumuGorseli: ozel.tumuGorseli || null,
     logoOlcegi: Math.min(180, Math.max(60, Number(ozel.logoOlcegi) || 100)),
+    logoKonumX: Math.min(80, Math.max(-80, Number(ozel.logoKonumX) || 0)),
+    logoKonumY: Math.min(30, Math.max(-30, Number(ozel.logoKonumY) || 0)),
     konsept,
     // Sıra önemli: işletmenin kendi yüklediği logo her zaman önce gelir,
     // yoksa konseptin varsayılan logosuna düşülür.
