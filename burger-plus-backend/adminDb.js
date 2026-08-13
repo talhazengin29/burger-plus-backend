@@ -287,6 +287,7 @@ export async function adminTablolariHazirla(isletmeId) {
       menu_yapisi JSONB,
       onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb,
       populer BOOLEAN NOT NULL DEFAULT false,
+      sira INTEGER NOT NULL DEFAULT 100,
       stok_takibi BOOLEAN NOT NULL DEFAULT false,
       stok_adedi INTEGER NOT NULL DEFAULT 0 CHECK (stok_adedi >= 0),
       arsivli BOOLEAN NOT NULL DEFAULT false,
@@ -383,6 +384,7 @@ export async function adminTablolariHazirla(isletmeId) {
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS menu_yapisi JSONB");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS populer BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS sira INTEGER NOT NULL DEFAULT 100");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS stok_takibi BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS stok_adedi INTEGER NOT NULL DEFAULT 0");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
@@ -540,6 +542,7 @@ function urunDonustur(u, { stokDetayi = false } = {}) {
     menuYapisi: u.menu_yapisi || null,
     onerilenUrunler: Array.isArray(u.onerilen_urunler) ? u.onerilen_urunler.map(Number).filter(Number.isInteger) : [],
     populer: u.populer === true,
+    sira: Number(u.sira ?? 100),
     stokTakibi: u.stok_takibi === true,
     stokta: u.stok_takibi !== true || Number(u.stok_adedi) > 0,
     aktif: u.aktif,
@@ -554,8 +557,9 @@ export async function urunleriGetir(isletmeId, { tumu = false, stokDetayi = fals
   const sonuc = await pool.query(`
     SELECT u.*
     FROM urunler u
+    LEFT JOIN kategoriler k ON k.isletme_id=u.isletme_id AND k.ad=u.kategori AND k.arsivli=false
     WHERE u.isletme_id=$1 AND u.arsivli=false ${tumu ? "" : "AND u.aktif=true"}
-    ORDER BY u.kategori, u.ad
+    ORDER BY COALESCE(k.sira,999), u.sira, u.ad
   `, [tenantId]);
   const stoklar = new Map(sonuc.rows.map((urun) => [Number(urun.id), {
     takip: urun.stok_takibi === true,
@@ -652,6 +656,8 @@ export async function urunKaydet(isletmeId, veri) {
   const menuYapisi = await menuYapisiniDogrula(tenantId, veri.menuYapisi, urunTipi);
   const onerilenUrunler = await onerilenUrunleriDogrula(tenantId, veri.onerilenUrunler, veri.id);
   const stokTakibi = veri.stokTakibi === true;
+  const sira = Math.floor(Number(veri.sira ?? 100));
+  if (!Number.isSafeInteger(sira) || sira < 0 || sira > 9999) throw new Error("Ürün gösterim sırası 0–9999 arasında olmalıdır.");
   const stokAdedi = stokTakibi ? Math.floor(Number(veri.stokAdedi)) : 0;
   if (stokTakibi && (!Number.isSafeInteger(stokAdedi) || stokAdedi < 0 || stokAdedi > 1000000)) {
     throw new Error("Stok adedi 0 ile 1.000.000 arasında olmalıdır.");
@@ -675,6 +681,7 @@ export async function urunKaydet(isletmeId, veri) {
     veri.populer === true,
     stokTakibi,
     stokAdedi,
+    sira,
   ];
   if (!alanlar[0] || alanlar[1] < 0) throw new Error("Ürün adı ve geçerli fiyat zorunludur.");
   await pool.query(
@@ -688,14 +695,14 @@ export async function urunKaydet(isletmeId, veri) {
           malzemeler=$6::jsonb, alerjenler=$7::jsonb, temel_miktar=$8,
           gramaj_opsiyonu=$9::jsonb, urun_tipi=$10, boyut_secenekleri=$11::jsonb,
           ekstra_malzeme_ayari=$12::jsonb, menu_yapisi=$13::jsonb, onerilen_urunler=$14::jsonb, aktif=$15, populer=$16,
-          stok_takibi=$17, stok_adedi=$18, arsivli=false, guncelleme=NOW()
-         WHERE isletme_id=$19 AND id=$20 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
+          stok_takibi=$17, stok_adedi=$18, sira=$19, arsivli=false, guncelleme=NOW()
+         WHERE isletme_id=$20 AND id=$21 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
       )
     : await pool.query(
         `INSERT INTO urunler
           (isletme_id,ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,temel_miktar,gramaj_opsiyonu,
-           urun_tipi,boyut_secenekleri,ekstra_malzeme_ayari,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,arsivli)
-         VALUES ($19,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,false) RETURNING *`, [...alanlar, tenantId]
+           urun_tipi,boyut_secenekleri,ekstra_malzeme_ayari,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,sira,arsivli)
+         VALUES ($20,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,false) RETURNING *`, [...alanlar, tenantId]
       );
   if (!sonuc.rows.length) throw new Error("Ürün bulunamadı veya arşivlenmiş.");
   return urunDonustur(sonuc.rows[0], { stokDetayi: true });
