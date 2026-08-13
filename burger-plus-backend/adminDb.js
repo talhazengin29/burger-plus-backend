@@ -169,6 +169,35 @@ function boyutSecenekleriniDogrula(ham, urunTipi) {
   });
 }
 
+function ekstraMalzemeAyariniDogrula(ham) {
+  if (ham == null) return { aktif: false, baslik: "Ekstra malzeme seç", minSecim: 0, maxSecim: 1, secenekler: [] };
+  if (typeof ham !== "object" || Array.isArray(ham)) throw new Error("Ekstra malzeme ayarı geçersiz.");
+  const aktif = ham.aktif === true;
+  const baslik = String(ham.baslik || "Ekstra malzeme seç").trim().slice(0, 80);
+  const hamSecenekler = Array.isArray(ham.secenekler) ? ham.secenekler : [];
+  if (hamSecenekler.length > 30) throw new Error("Bir ürüne en fazla 30 ekstra malzeme ekleyebilirsin.");
+  const idler = new Set();
+  const secenekler = hamSecenekler.map((secenek, index) => {
+    const id = String(secenek?.id || `ekstra-${index + 1}`).trim().toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 40);
+    const ad = String(secenek?.ad || "").trim().replace(/\s+/g, " ").slice(0, 80);
+    const fiyat = sayi(secenek?.fiyat, NaN);
+    if (!id || idler.has(id)) throw new Error("Ekstra malzeme kodları benzersiz olmalıdır.");
+    if (!ad) throw new Error("Ekstra malzeme adı zorunludur.");
+    if (!Number.isFinite(fiyat) || fiyat < 0 || fiyat > 100000) throw new Error("Ekstra malzeme fiyatı geçersiz.");
+    idler.add(id);
+    return { id, ad, fiyat, aktif: secenek?.aktif !== false };
+  });
+  const aktifSayisi = secenekler.filter((secenek) => secenek.aktif).length;
+  const maxSecim = Math.floor(sayi(ham.maxSecim, 1));
+  const minSecim = Math.floor(sayi(ham.minSecim, 0));
+  if (!baslik) throw new Error("Ekstra malzeme başlığı zorunludur.");
+  if (!Number.isInteger(maxSecim) || maxSecim < 1 || maxSecim > 10) throw new Error("Maksimum ekstra seçimi 1–10 arasında olmalıdır.");
+  if (!Number.isInteger(minSecim) || minSecim < 0 || minSecim > maxSecim) throw new Error("Minimum ekstra seçimi geçersiz.");
+  if (aktif && aktifSayisi < 1) throw new Error("Ekstra malzeme alanını açmak için en az bir aktif seçenek eklemelisin.");
+  if (aktif && minSecim > aktifSayisi) throw new Error("Minimum seçim sayısı aktif malzeme sayısını aşamaz.");
+  return { aktif, baslik, minSecim, maxSecim: Math.min(maxSecim, Math.max(1, aktifSayisi || maxSecim)), secenekler };
+}
+
 async function menuYapisiniDogrula(isletmeId, ham, urunTipi) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   if (urunTipi !== "menu") return null;
@@ -252,6 +281,7 @@ export async function adminTablolariHazirla(isletmeId) {
       gramaj_opsiyonu JSONB,
       urun_tipi TEXT NOT NULL DEFAULT 'burger',
       boyut_secenekleri JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ekstra_malzeme_ayari JSONB NOT NULL DEFAULT '{"aktif":false,"baslik":"Ekstra malzeme seç","minSecim":0,"maxSecim":1,"secenekler":[]}'::jsonb,
       menu_yapisi JSONB,
       onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb,
       populer BOOLEAN NOT NULL DEFAULT false,
@@ -347,6 +377,7 @@ export async function adminTablolariHazirla(isletmeId) {
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS besin_degerleri JSONB");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS urun_tipi TEXT NOT NULL DEFAULT 'burger'");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS boyut_secenekleri JSONB NOT NULL DEFAULT '[]'::jsonb");
+  await pool.query(`ALTER TABLE urunler ADD COLUMN IF NOT EXISTS ekstra_malzeme_ayari JSONB NOT NULL DEFAULT '{"aktif":false,"baslik":"Ekstra malzeme seç","minSecim":0,"maxSecim":1,"secenekler":[]}'::jsonb`);
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS menu_yapisi JSONB");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS onerilen_urunler JSONB NOT NULL DEFAULT '[]'::jsonb");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS populer BOOLEAN NOT NULL DEFAULT false");
@@ -503,6 +534,7 @@ function urunDonustur(u, { stokDetayi = false } = {}) {
     temelMiktar: u.temel_miktar == null ? null : Number(u.temel_miktar),
     urunTipi: u.urun_tipi || "burger",
     boyutSecenekleri: u.boyut_secenekleri || [],
+    ekstraMalzemeAyari: u.ekstra_malzeme_ayari || { aktif: false, baslik: "Ekstra malzeme seç", minSecim: 0, maxSecim: 1, secenekler: [] },
     menuYapisi: u.menu_yapisi || null,
     onerilenUrunler: Array.isArray(u.onerilen_urunler) ? u.onerilen_urunler.map(Number).filter(Number.isInteger) : [],
     populer: u.populer === true,
@@ -614,6 +646,7 @@ export async function urunKaydet(isletmeId, veri) {
     ? sayi(veri.temelMiktar) : null;
   const gramajOpsiyonu = urunTipi === "burger" ? gramajOpsiyonunuDogrula(veri.gramajOpsiyonu, temelMiktar) : null;
   const boyutSecenekleri = boyutSecenekleriniDogrula(veri.boyutSecenekleri, urunTipi);
+  const ekstraMalzemeAyari = ekstraMalzemeAyariniDogrula(veri.ekstraMalzemeAyari);
   const menuYapisi = await menuYapisiniDogrula(tenantId, veri.menuYapisi, urunTipi);
   const onerilenUrunler = await onerilenUrunleriDogrula(tenantId, veri.onerilenUrunler, veri.id);
   const stokTakibi = veri.stokTakibi === true;
@@ -633,6 +666,7 @@ export async function urunKaydet(isletmeId, veri) {
     gramajOpsiyonu == null ? null : JSON.stringify(gramajOpsiyonu),
     urunTipi,
     JSON.stringify(boyutSecenekleri),
+    JSON.stringify(ekstraMalzemeAyari),
     menuYapisi == null ? null : JSON.stringify(menuYapisi),
     JSON.stringify(onerilenUrunler),
     veri.aktif !== false,
@@ -651,15 +685,15 @@ export async function urunKaydet(isletmeId, veri) {
         `UPDATE urunler SET ad=$1, fiyat=$2, kategori=$3, gorsel=$4, aciklama=$5,
           malzemeler=$6::jsonb, alerjenler=$7::jsonb, temel_miktar=$8,
           gramaj_opsiyonu=$9::jsonb, urun_tipi=$10, boyut_secenekleri=$11::jsonb,
-          menu_yapisi=$12::jsonb, onerilen_urunler=$13::jsonb, aktif=$14, populer=$15,
-          stok_takibi=$16, stok_adedi=$17, arsivli=false, guncelleme=NOW()
-         WHERE isletme_id=$18 AND id=$19 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
+          ekstra_malzeme_ayari=$12::jsonb, menu_yapisi=$13::jsonb, onerilen_urunler=$14::jsonb, aktif=$15, populer=$16,
+          stok_takibi=$17, stok_adedi=$18, arsivli=false, guncelleme=NOW()
+         WHERE isletme_id=$19 AND id=$20 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
       )
     : await pool.query(
         `INSERT INTO urunler
           (isletme_id,ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,temel_miktar,gramaj_opsiyonu,
-           urun_tipi,boyut_secenekleri,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,arsivli)
-         VALUES ($18,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14,$15,$16,$17,false) RETURNING *`, [...alanlar, tenantId]
+           urun_tipi,boyut_secenekleri,ekstra_malzeme_ayari,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,arsivli)
+         VALUES ($19,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,false) RETURNING *`, [...alanlar, tenantId]
       );
   if (!sonuc.rows.length) throw new Error("Ürün bulunamadı veya arşivlenmiş.");
   return urunDonustur(sonuc.rows[0], { stokDetayi: true });

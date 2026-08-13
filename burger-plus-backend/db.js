@@ -487,7 +487,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
 
   const sonuc = await pool.query(
     `SELECT id,ad,fiyat,kategori,gorsel,malzemeler,temel_miktar,gramaj_opsiyonu,urun_tipi,
-            boyut_secenekleri,menu_yapisi,aktif,stok_takibi,stok_adedi
+            boyut_secenekleri,ekstra_malzeme_ayari,menu_yapisi,aktif,stok_takibi,stok_adedi
      FROM urunler WHERE isletme_id=$1 AND id = ANY($2::int[]) AND arsivli=false`,
     [tenantId, idler]
   );
@@ -593,6 +593,30 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
         ...boyutSec(icecek, gonderilenSecimler.icecekBoyutKodu, menu.varsayilanIcecekBoyut, "icecek"),
       };
     }
+
+    const ekstraAyari = urun.ekstra_malzeme_ayari && typeof urun.ekstra_malzeme_ayari === "object"
+      ? urun.ekstra_malzeme_ayari : null;
+    const ekstraAdaylari = Array.isArray(gonderilenSecimler.ekstraMalzemeIdleri)
+      ? gonderilenSecimler.ekstraMalzemeIdleri : [];
+    const ekstraIdleri = [...new Set(ekstraAdaylari.map((id) => String(id || "").trim()).filter(Boolean))];
+    let ekstraMalzemeler = [];
+    let ekstraMalzemeFiyati = 0;
+    if (ekstraAyari?.aktif === true) {
+      const secenekler = Array.isArray(ekstraAyari.secenekler) ? ekstraAyari.secenekler.filter((secenek) => secenek?.aktif !== false) : [];
+      const secenekHaritasi = new Map(secenekler.map((secenek) => [String(secenek.id), secenek]));
+      const minSecim = Math.max(0, Math.floor(Number(ekstraAyari.minSecim || 0)));
+      const maxSecim = Math.max(1, Math.floor(Number(ekstraAyari.maxSecim || 1)));
+      if (ekstraIdleri.length < minSecim || ekstraIdleri.length > maxSecim) throw new Error(`${urun.ad} için ekstra malzeme seçim sayısı geçersiz.`);
+      ekstraMalzemeler = ekstraIdleri.map((id) => {
+        const secenek = secenekHaritasi.get(id);
+        if (!secenek) throw new Error(`${urun.ad} için seçilen ekstra malzeme geçersiz.`);
+        const fiyat = Number(secenek.fiyat || 0);
+        ekstraMalzemeFiyati += fiyat;
+        return { id, ad: String(secenek.ad), fiyat };
+      });
+    } else if (ekstraIdleri.length) {
+      throw new Error(`${urun.ad} için ekstra malzeme seçimi kapalı.`);
+    }
     const secimler = {
       dahilMalzemeler: tumMalzemeler.filter((m) => !haricMalzemeler.includes(m)),
       haricMalzemeler,
@@ -604,6 +628,8 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
         gramajBirim: kural?.birim || "gr",
       } : {}),
       ...boyutSecimleri,
+      ekstraMalzemeIdleri: ekstraMalzemeler.map((ekstra) => ekstra.id),
+      ekstraMalzemeler,
     };
     const kampanya = kampanyaIndirimleri.get(urun.kategori) || null;
     const temelFiyat = Number(urun.fiyat);
@@ -614,8 +640,8 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
       kategori: urun.kategori,
       gorsel: urun.gorsel || null,
       adet,
-      fiyat: indirimliFiyat + gramajFiyat + boyutFiyati,
-      orijinalFiyat: kampanya ? temelFiyat + gramajFiyat + boyutFiyati : null,
+      fiyat: indirimliFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati,
+      orijinalFiyat: kampanya ? temelFiyat + gramajFiyat + boyutFiyati + ekstraMalzemeFiyati : null,
       kampanya,
       temelMiktar: standartGramaj || null,
       malzemeler: tumMalzemeler,
