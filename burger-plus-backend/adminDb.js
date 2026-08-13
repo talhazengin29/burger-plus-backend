@@ -113,6 +113,7 @@ function varsayilanGramajOpsiyonu(kategori, temelMiktar, fiyat) {
   const temel = sayi(temelMiktar);
   if (!kural || temel <= 0) return null;
   return {
+    goster: true,
     aktif: true,
     etiket: kural.etiket,
     birim: kural.birim,
@@ -125,8 +126,9 @@ function varsayilanGramajOpsiyonu(kategori, temelMiktar, fiyat) {
 function gramajOpsiyonunuDogrula(ham, temelMiktar) {
   if (ham == null) return null;
   if (typeof ham !== "object" || Array.isArray(ham)) throw new Error("Gramaj artırma kuralı geçersiz.");
-  const aktif = ham.aktif === true;
-  const etiket = String(ham.etiket || "Gramaj artırımı").trim().slice(0, 80);
+  const goster = ham.goster !== false;
+  const aktif = goster && ham.aktif === true;
+  const etiket = String(ham.etiket || "Ürün miktarı").trim().slice(0, 80);
   const birim = String(ham.birim || "gr").trim().toLowerCase().slice(0, 12);
   const artisMiktari = sayi(ham.artisMiktari, NaN);
   const maxAdim = Math.floor(sayi(ham.maxAdim, NaN));
@@ -135,8 +137,8 @@ function gramajOpsiyonunuDogrula(ham, temelMiktar) {
   if (!Number.isFinite(artisMiktari) || artisMiktari <= 0 || artisMiktari > 10000) throw new Error("Artış miktarı 0'dan büyük olmalıdır.");
   if (!Number.isInteger(maxAdim) || maxAdim < 1 || maxAdim > 20) throw new Error("Maksimum artış adımı 1–20 arasında olmalıdır.");
   if (!Number.isFinite(fiyatArtisi) || fiyatArtisi < 0 || fiyatArtisi > 100000) throw new Error("Gramaj fiyat artışı geçersiz.");
-  if (aktif && sayi(temelMiktar) <= 0) throw new Error("Gramaj artırımı için temel miktar gereklidir.");
-  return { aktif, etiket, birim, artisMiktari, maxAdim, fiyatArtisi };
+  if (goster && sayi(temelMiktar) <= 0) throw new Error("Miktar bilgisini göstermek için standart miktar gereklidir.");
+  return { goster, aktif, etiket, birim, artisMiktari, maxAdim, fiyatArtisi };
 }
 
 const URUN_TIPLERI = new Set(["burger", "yan_lezzet", "icecek", "menu"]);

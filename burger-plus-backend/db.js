@@ -532,7 +532,8 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
       throw new Error(`${urun.ad} menüsündeki bir ürün artık satışta değil.`);
     }
 
-    const kural = burger?.gramaj_opsiyonu && burger.gramaj_opsiyonu.aktif ? burger.gramaj_opsiyonu : null;
+    const miktarAyari = burger?.gramaj_opsiyonu && burger.gramaj_opsiyonu.goster !== false ? burger.gramaj_opsiyonu : null;
+    const kural = miktarAyari?.aktif ? miktarAyari : null;
     const istenenEkstra = Number(gonderilenSecimler.ekstraGramaj || 0);
     let ekstraGramaj = 0;
     let gramajFiyat = 0;
@@ -557,7 +558,7 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
     const haricMalzemeler = [...new Set(haricAdaylari
       .filter((m) => typeof m === "string" && tumMalzemeler.includes(m)))]
       .slice(0, 50);
-    const standartGramaj = Number(burger?.temel_miktar || 0);
+    const standartGramaj = miktarAyari ? Number(burger?.temel_miktar || 0) : 0;
     let boyutFiyati = 0;
     const boyutSec = (kaynak, istenenKod, varsayilanKod, alan) => {
       const secenekler = Array.isArray(kaynak?.boyut_secenekleri) ? kaynak.boyut_secenekleri : [];
@@ -624,8 +625,8 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
         standartGramaj,
         ekstraGramaj,
         toplamGramaj: standartGramaj + ekstraGramaj,
-        gramajEtiketi: kural?.etiket || "Ürün gramajı",
-        gramajBirim: kural?.birim || "gr",
+        gramajEtiketi: miktarAyari?.etiket || "Ürün miktarı",
+        gramajBirim: miktarAyari?.birim || "gr",
       } : {}),
       ...boyutSecimleri,
       ekstraMalzemeIdleri: ekstraMalzemeler.map((ekstra) => ekstra.id),
