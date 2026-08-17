@@ -112,6 +112,11 @@ import {
 } from "./superAdminDb.js";
 import { sablonuGetir, slugOlustur } from "./sablonlar.js";
 import { isletmeKurulumunuYap, slugMusaitlikDurumu } from "./kurulumDb.js";
+import {
+  personelCagriTablolariHazirla, masaCagriOturumuBaslat, masaPersonelCagrisiniGetir,
+  masaPersonelCagrisiOlustur, aktifPersonelCagrilariniGetir,
+  personelCagrisiDurumGuncelle, masaCagriOturumlariniKapat,
+} from "./personelCagriDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -150,7 +155,7 @@ const corsAyarlari = {
     callback(hata);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Isletme", "X-Masa-Token"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Isletme", "X-Masa-Token", "X-Masa-Oturum"],
 };
 // İyzico'nun ödeme sayfası callback'i tarayıcıdan otomatik form-post ile
 // gönderir; bu istek kendi domainini Origin header'ında taşır ve frontend
@@ -196,6 +201,16 @@ const superAdminGirisLimiti = rateLimit({
 const nakitSiparisLimiti = rateLimit({
   windowMs: 5 * 60_000, limit: URETIM ? 12 : 60, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla nakit sipariş isteği gönderildi. Lütfen personelden yardım isteyin." },
+});
+const personelCagriOturumLimiti = rateLimit({
+  // Restoran Wi-Fi'sindeki tüm müşteriler aynı dış IP'yi paylaşabilir. Asıl
+  // kötüye kullanım sınırı aşağıdaki masa/cihaz kurallarıdır; IP limiti kaba emniyet ağıdır.
+  windowMs: 15 * 60_000, limit: URETIM ? 120 : 300, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla masa oturumu istendi. Lütfen personelden yardım isteyin." },
+});
+const personelCagriLimiti = rateLimit({
+  windowMs: 10 * 60_000, limit: URETIM ? 120 : 300, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla personel çağrısı gönderildi. Lütfen bir süre bekleyin." },
 });
 
 const httpServer = createServer(app);
@@ -401,6 +416,59 @@ app.get("/api/masa/:masaNo", async (req, res) => {
     return res.status(403).json({ hata: "Masa QR erisimi gecersiz." });
   }
   res.json(await masaSiparisleriniGetir(req.isletme.id, masaNo));
+});
+
+async function personelCagrilariniYayinla(isletmeId) {
+  const cagrilar = await aktifPersonelCagrilariniGetir(isletmeId, pool);
+  io.to(oda(isletmeId, "salon")).emit("personel-cagrilari-guncellendi", cagrilar);
+  return cagrilar;
+}
+
+app.post("/api/masa/:masaNo/cagri-oturumu", personelCagriOturumLimiti, async (req, res) => {
+  try {
+    const masaNo = guvenliMasaNo(req.params.masaNo);
+    if (!masaNo) return res.status(400).json({ hata: "Masa numarası geçersiz." });
+    if (!masaErisimTokeniniDogrula(req.headers["x-masa-token"], req.isletme.id, masaNo)) {
+      return res.status(403).json({ hata: "Masa QR erişimi geçersiz." });
+    }
+    const oturum = await masaCagriOturumuBaslat(req.isletme.id, pool, masaNo, req.body?.cihazAnahtari);
+    res.status(201).json({ oturum });
+  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Masa oturumu açılamadı." }); }
+});
+
+app.get("/api/masa/:masaNo/personel-cagrisi", async (req, res) => {
+  try {
+    const masaNo = guvenliMasaNo(req.params.masaNo);
+    if (!masaNo) return res.status(400).json({ hata: "Masa numarası geçersiz." });
+    const cagri = await masaPersonelCagrisiniGetir(req.isletme.id, pool, masaNo, req.headers["x-masa-oturum"]);
+    res.json({ cagri });
+  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Personel çağrısı alınamadı." }); }
+});
+
+app.post("/api/masa/:masaNo/personel-cagrisi", personelCagriLimiti, async (req, res) => {
+  try {
+    const masaNo = guvenliMasaNo(req.params.masaNo);
+    if (!masaNo) return res.status(400).json({ hata: "Masa numarası geçersiz." });
+    const cagri = await masaPersonelCagrisiOlustur(
+      req.isletme.id, pool, masaNo, req.headers["x-masa-oturum"], req.body?.neden, req.body?.istekAnahtari
+    );
+    io.to(oda(req.isletme.id, `masa-${masaNo}`)).emit("personel-cagrisi-guncellendi", cagri);
+    await personelCagrilariniYayinla(req.isletme.id);
+    res.status(201).json({ cagri });
+  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Personel çağrılamadı." }); }
+});
+
+app.get("/api/personel/personel-cagrilari", rolMiddleware(["salon", "kasiyer"]), async (req, res) => {
+  res.json({ cagrilar: await aktifPersonelCagrilariniGetir(req.isletme.id, pool) });
+});
+
+app.patch("/api/personel/personel-cagrilari/:id", rolMiddleware(["salon", "kasiyer"]), async (req, res) => {
+  try {
+    const cagri = await personelCagrisiDurumGuncelle(req.isletme.id, pool, req.params.id, req.body?.durum, req.kullanici?.id);
+    io.to(oda(req.isletme.id, `masa-${cagri.masaNo}`)).emit("personel-cagrisi-guncellendi", cagri);
+    await personelCagrilariniYayinla(req.isletme.id);
+    res.json({ cagri });
+  } catch (e) { res.status(400).json({ hata: e.message || "Çağrı güncellenemedi." }); }
 });
 
 app.get("/api/mutfak", rolMiddleware(["mutfak", "salon", "kasiyer"]), async (req, res) => {
@@ -1244,6 +1312,7 @@ io.on("connection", (socket) => {
     const tenantId = socket.data.isletmeId;
     socket.join(oda(tenantId, "salon"));
     socket.emit("salon-guncellendi", await tumAcikMasalar(tenantId));
+    socket.emit("personel-cagrilari-guncellendi", await aktifPersonelCagrilariniGetir(tenantId, pool));
     console.log(`${socket.id} -> ${oda(tenantId, "salon")}`);
   });
 
@@ -1287,11 +1356,13 @@ io.on("connection", (socket) => {
     }
     masaSirayaAl(tenantId, masaNo, async () => {
       const bos = await masaKapat(tenantId, masaNo, socket.kullanici?.id);
+      await masaCagriOturumlariniKapat(tenantId, pool, masaNo);
       io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-guncellendi", bos);
       io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-kapandi", { masaNo });
       const tumMasalar = await tumAcikMasalar(tenantId);
       io.to(oda(tenantId, "mutfak")).emit("mutfak-guncellendi", tumMasalar);
       io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
+      await personelCagrilariniYayinla(tenantId);
       nakitDegisikliginiYayinla(tenantId, masaNo);
       io.to(oda(tenantId, "yonetim")).emit("yonetim-operasyon-guncellendi", { masaNo, durum: "kapali", zaman: new Date().toISOString() });
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
@@ -1336,6 +1407,7 @@ isletmeTablosunuHazirla()
   .then(() => adminTablolariHazirla(varsayilanIsletmeId))
   .then(() => sadakatTablolariHazirla(varsayilanIsletmeId, pool))
   .then(() => cuzdanTablolariHazirla(pool))
+  .then(() => personelCagriTablolariHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
   .then(() => ilkSuperAdminiHazirla())
