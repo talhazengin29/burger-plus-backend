@@ -261,6 +261,7 @@ export async function adminTablolariHazirla(isletmeId) {
       id SERIAL PRIMARY KEY,
       isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
       ad TEXT NOT NULL,
+      ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb,
       gorsel TEXT,
       sira INTEGER NOT NULL DEFAULT 0,
       aktif BOOLEAN NOT NULL DEFAULT true,
@@ -272,6 +273,7 @@ export async function adminTablolariHazirla(isletmeId) {
       id SERIAL PRIMARY KEY,
       isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
       ad TEXT NOT NULL,
+      ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb,
       fiyat NUMERIC NOT NULL CHECK (fiyat >= 0),
       kategori TEXT NOT NULL,
       gorsel TEXT,
@@ -331,6 +333,7 @@ export async function adminTablolariHazirla(isletmeId) {
       isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
       baslik TEXT NOT NULL,
       mesaj TEXT NOT NULL,
+      ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb,
       hedef TEXT NOT NULL DEFAULT '/anasayfa',
       aktif BOOLEAN NOT NULL DEFAULT true,
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -339,6 +342,7 @@ export async function adminTablolariHazirla(isletmeId) {
     CREATE TABLE IF NOT EXISTS kampanyalar (
       id SERIAL PRIMARY KEY, isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
       kod TEXT, etiket TEXT NOT NULL, baslik TEXT NOT NULL,
+      ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb,
       aciklama TEXT NOT NULL, buton TEXT NOT NULL DEFAULT 'Sipariş Ver', buton_tipi TEXT NOT NULL DEFAULT 'primary',
       gorsel TEXT, ikon TEXT, aktif BOOLEAN NOT NULL DEFAULT true, baslangic_saat SMALLINT, bitis_saat SMALLINT,
       indirim_yuzde NUMERIC NOT NULL DEFAULT 0, gecerli_kategoriler JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -378,6 +382,8 @@ export async function adminTablolariHazirla(isletmeId) {
   `);
 
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS besin_degerleri JSONB");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb");
+  await pool.query("ALTER TABLE kategoriler ADD COLUMN IF NOT EXISTS ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS urun_tipi TEXT NOT NULL DEFAULT 'burger'");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS boyut_secenekleri JSONB NOT NULL DEFAULT '[]'::jsonb");
   await pool.query(`ALTER TABLE urunler ADD COLUMN IF NOT EXISTS ekstra_malzeme_ayari JSONB NOT NULL DEFAULT '{"aktif":false,"baslik":"Ekstra malzeme seç","minSecim":0,"maxSecim":1,"secenekler":[]}'::jsonb`);
@@ -391,7 +397,9 @@ export async function adminTablolariHazirla(isletmeId) {
   await pool.query("ALTER TABLE kategoriler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE personeller ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE duyurular ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE duyurular ADD COLUMN IF NOT EXISTS ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb");
   await pool.query("ALTER TABLE kampanyalar ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
+  await pool.query("ALTER TABLE kampanyalar ADD COLUMN IF NOT EXISTS ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb");
   await pool.query("ALTER TABLE kampanyalar ADD COLUMN IF NOT EXISTS ikon TEXT");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazirlamaya_baslandi TIMESTAMPTZ");
   await pool.query("ALTER TABLE siparis_kalemleri ADD COLUMN IF NOT EXISTS hazir_at TIMESTAMPTZ");
@@ -524,10 +532,24 @@ export async function adminTablolariHazirla(isletmeId) {
   }
 }
 
+function cevirileriTemizle(ham, alanlar) {
+  if (ham == null) return {};
+  if (typeof ham !== "object" || Array.isArray(ham)) throw new Error("Çeviri bilgisi geçersiz.");
+  const sonuc = {};
+  for (const [alan, ustSinir] of Object.entries(alanlar)) {
+    const dilDegerleri = ham[alan];
+    if (!dilDegerleri || typeof dilDegerleri !== "object" || Array.isArray(dilDegerleri)) continue;
+    const en = String(dilDegerleri.en || "").replace(/<[^>]*>/g, " ").replace(/[<>]/g, "").replace(/\s+/g, " ").trim().slice(0, ustSinir);
+    if (en) sonuc[alan] = { en };
+  }
+  return sonuc;
+}
+
 function urunDonustur(u, { stokDetayi = false } = {}) {
   const urun = {
     id: u.id,
     ad: u.ad,
+    ceviriler: u.ceviriler || {},
     fiyat: Number(u.fiyat),
     kategori: u.kategori,
     gorsel: u.gorsel,
@@ -581,6 +603,7 @@ function kategoriDonustur(kategori) {
   return {
     id: kategori.id,
     ad: kategori.ad,
+    ceviriler: kategori.ceviriler || {},
     gorsel: kategori.gorsel,
     sira: Number(kategori.sira || 0),
     aktif: kategori.aktif,
@@ -590,7 +613,7 @@ function kategoriDonustur(kategori) {
 export async function kategorileriGetir(isletmeId, { tumu = false } = {}) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await pool.query(`
-    SELECT id,ad,gorsel,sira,aktif
+    SELECT id,ad,ceviriler,gorsel,sira,aktif
     FROM kategoriler
     WHERE isletme_id=$1 AND arsivli=false ${tumu ? "" : "AND aktif=true"}
     ORDER BY sira, ad
@@ -603,6 +626,7 @@ export async function kategoriKaydet(isletmeId, veri) {
   const ad = String(veri.ad || "").trim().replace(/\s+/g, " ").slice(0, 60);
   const gorsel = String(veri.gorsel || "").trim().slice(0, 1000);
   const sira = Math.floor(sayi(veri.sira, 0));
+  const ceviriler = cevirileriTemizle(veri.ceviriler, { ad: 60 });
   if (ad.length < 2 || /[\u0000-\u001F\u007F]/.test(ad)) throw new Error("Kategori adı en az 2 karakter olmalıdır.");
   if (ad.toLocaleLowerCase("tr") === "tümü".toLocaleLowerCase("tr")) throw new Error("Tümü adı uygulama tarafından otomatik oluşturulur.");
   if (!gorsel) throw new Error("Kategori görseli zorunludur.");
@@ -622,16 +646,16 @@ export async function kategoriKaydet(isletmeId, veri) {
       const mevcut = await istemci.query("SELECT ad FROM kategoriler WHERE isletme_id=$1 AND id=$2 FOR UPDATE", [tenantId, veri.id]);
       if (!mevcut.rows.length) throw new Error("Kategori bulunamadı.");
       sonuc = await istemci.query(
-        "UPDATE kategoriler SET ad=$1,gorsel=$2,sira=$3,guncelleme=NOW() WHERE isletme_id=$4 AND id=$5 RETURNING *",
-        [ad, gorsel, sira, tenantId, veri.id]
+        "UPDATE kategoriler SET ad=$1,gorsel=$2,sira=$3,ceviriler=$4::jsonb,guncelleme=NOW() WHERE isletme_id=$5 AND id=$6 RETURNING *",
+        [ad, gorsel, sira, JSON.stringify(ceviriler), tenantId, veri.id]
       );
       if (mevcut.rows[0].ad !== ad) {
         await istemci.query("UPDATE urunler SET kategori=$1,guncelleme=NOW() WHERE isletme_id=$2 AND kategori=$3", [ad, tenantId, mevcut.rows[0].ad]);
       }
     } else {
       sonuc = await istemci.query(
-        "INSERT INTO kategoriler (isletme_id,ad,gorsel,sira,aktif) VALUES ($1,$2,$3,$4,true) RETURNING *",
-        [tenantId, ad, gorsel, sira]
+        "INSERT INTO kategoriler (isletme_id,ad,gorsel,sira,ceviriler,aktif) VALUES ($1,$2,$3,$4,$5::jsonb,true) RETURNING *",
+        [tenantId, ad, gorsel, sira, JSON.stringify(ceviriler)]
       );
     }
     await istemci.query("COMMIT");
@@ -657,6 +681,7 @@ export async function urunKaydet(isletmeId, veri) {
   const onerilenUrunler = await onerilenUrunleriDogrula(tenantId, veri.onerilenUrunler, veri.id);
   const stokTakibi = veri.stokTakibi === true;
   const sira = Math.floor(Number(veri.sira ?? 100));
+  const ceviriler = cevirileriTemizle(veri.ceviriler, { ad: 120, aciklama: 2000 });
   if (!Number.isSafeInteger(sira) || sira < 0 || sira > 9999) throw new Error("Ürün gösterim sırası 0–9999 arasında olmalıdır.");
   const stokAdedi = stokTakibi ? Math.floor(Number(veri.stokAdedi)) : 0;
   if (stokTakibi && (!Number.isSafeInteger(stokAdedi) || stokAdedi < 0 || stokAdedi > 1000000)) {
@@ -682,6 +707,7 @@ export async function urunKaydet(isletmeId, veri) {
     stokTakibi,
     stokAdedi,
     sira,
+    JSON.stringify(ceviriler),
   ];
   if (!alanlar[0] || alanlar[1] < 0) throw new Error("Ürün adı ve geçerli fiyat zorunludur.");
   await pool.query(
@@ -695,14 +721,14 @@ export async function urunKaydet(isletmeId, veri) {
           malzemeler=$6::jsonb, alerjenler=$7::jsonb, temel_miktar=$8,
           gramaj_opsiyonu=$9::jsonb, urun_tipi=$10, boyut_secenekleri=$11::jsonb,
           ekstra_malzeme_ayari=$12::jsonb, menu_yapisi=$13::jsonb, onerilen_urunler=$14::jsonb, aktif=$15, populer=$16,
-          stok_takibi=$17, stok_adedi=$18, sira=$19, arsivli=false, guncelleme=NOW()
-         WHERE isletme_id=$20 AND id=$21 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
+          stok_takibi=$17, stok_adedi=$18, sira=$19, ceviriler=$20::jsonb, arsivli=false, guncelleme=NOW()
+         WHERE isletme_id=$21 AND id=$22 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
       )
     : await pool.query(
         `INSERT INTO urunler
           (isletme_id,ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,temel_miktar,gramaj_opsiyonu,
-           urun_tipi,boyut_secenekleri,ekstra_malzeme_ayari,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,sira,arsivli)
-         VALUES ($20,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,false) RETURNING *`, [...alanlar, tenantId]
+           urun_tipi,boyut_secenekleri,ekstra_malzeme_ayari,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,sira,ceviriler,arsivli)
+         VALUES ($21,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20::jsonb,false) RETURNING *`, [...alanlar, tenantId]
       );
   if (!sonuc.rows.length) throw new Error("Ürün bulunamadı veya arşivlenmiş.");
   return urunDonustur(sonuc.rows[0], { stokDetayi: true });
@@ -879,7 +905,7 @@ export async function vardiyaDegistir(isletmeId, personelId, islem) {
 export async function duyurulariGetir(isletmeId, { tumu = false } = {}) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await pool.query(
-    `SELECT id,baslik,mesaj,hedef,aktif,olusturma FROM duyurular
+    `SELECT id,baslik,mesaj,ceviriler,hedef,aktif,olusturma FROM duyurular
      WHERE isletme_id=$1 AND arsivli=false ${tumu ? "" : "AND aktif=true"}
      ORDER BY olusturma DESC LIMIT 30`,
     [tenantId]
@@ -891,18 +917,19 @@ export async function duyuruKaydet(isletmeId, veri) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const baslik = String(veri.baslik || "").trim().slice(0, 100);
   const mesaj = String(veri.mesaj || "").trim().slice(0, 600);
+  const ceviriler = cevirileriTemizle(veri.ceviriler, { baslik: 100, mesaj: 600 });
   const hamHedef = String(veri.hedef || "/anasayfa").trim();
   const hedef = hamHedef.startsWith("/") && !hamHedef.startsWith("//") ? hamHedef.slice(0, 160) : "/anasayfa";
   if (!baslik || !mesaj) throw new Error("Duyuru başlığı ve mesajı zorunludur.");
   const sonuc = await pool.query(
-    `INSERT INTO duyurular (isletme_id,baslik,mesaj,hedef,aktif) VALUES ($1,$2,$3,$4,true) RETURNING *`,
-    [tenantId, baslik, mesaj, hedef]
+    `INSERT INTO duyurular (isletme_id,baslik,mesaj,ceviriler,hedef,aktif) VALUES ($1,$2,$3,$4::jsonb,$5,true) RETURNING *`,
+    [tenantId, baslik, mesaj, JSON.stringify(ceviriler), hedef]
   );
   return sonuc.rows[0];
 }
 
 function kampanyayiDonustur(kampanya) {
-  return { id: Number(kampanya.id), kod: kampanya.kod || null, etiket: kampanya.etiket, baslik: kampanya.baslik, aciklama: kampanya.aciklama, buton: kampanya.buton, butonTipi: kampanya.buton_tipi, gorsel: kampanya.gorsel || null, ikon: kampanya.ikon || null, aktif: kampanya.aktif, baslangicSaat: kampanya.baslangic_saat == null ? null : Number(kampanya.baslangic_saat), bitisSaat: kampanya.bitis_saat == null ? null : Number(kampanya.bitis_saat), indirimYuzde: Number(kampanya.indirim_yuzde || 0), gecerliKategoriler: Array.isArray(kampanya.gecerli_kategoriler) ? kampanya.gecerli_kategoriler : [], kampanyaTipi: kampanya.kampanya_tipi, sira: Number(kampanya.sira || 0) };
+  return { id: Number(kampanya.id), kod: kampanya.kod || null, etiket: kampanya.etiket, baslik: kampanya.baslik, aciklama: kampanya.aciklama, buton: kampanya.buton, ceviriler: kampanya.ceviriler || {}, butonTipi: kampanya.buton_tipi, gorsel: kampanya.gorsel || null, ikon: kampanya.ikon || null, aktif: kampanya.aktif, baslangicSaat: kampanya.baslangic_saat == null ? null : Number(kampanya.baslangic_saat), bitisSaat: kampanya.bitis_saat == null ? null : Number(kampanya.bitis_saat), indirimYuzde: Number(kampanya.indirim_yuzde || 0), gecerliKategoriler: Array.isArray(kampanya.gecerli_kategoriler) ? kampanya.gecerli_kategoriler : [], kampanyaTipi: kampanya.kampanya_tipi, sira: Number(kampanya.sira || 0) };
 }
 
 export async function kampanyalariGetir(isletmeId, { tumu = false } = {}) {
@@ -914,6 +941,7 @@ export async function kampanyalariGetir(isletmeId, { tumu = false } = {}) {
 export async function kampanyaKaydet(isletmeId, veri) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const id = veri.id == null || veri.id === "" ? null : Number(veri.id);
+  const ceviriler = cevirileriTemizle(veri.ceviriler, { etiket: 80, baslik: 120, aciklama: 600, buton: 60 });
   const etiket = String(veri.etiket || "").trim().slice(0, 80), baslik = String(veri.baslik || "").trim().slice(0, 120), aciklama = String(veri.aciklama || "").trim().slice(0, 600), buton = String(veri.buton || "Sipariş Ver").trim().slice(0, 60);
   const butonTipi = ["primary", "charcoal"].includes(veri.butonTipi) ? veri.butonTipi : "primary", gorsel = String(veri.gorsel || "").trim().slice(0, 1000) || null, ikon = String(veri.ikon || "").trim().replace(/[\u0000-\u001F\u007F]/g, "").slice(0, 16) || null, kampanyaTipi = ["surekli", "saatli"].includes(veri.kampanyaTipi) ? veri.kampanyaTipi : "surekli", indirimYuzde = Number(veri.indirimYuzde), sira = Math.floor(Number(veri.sira || 0));
   const kategoriler = [...new Set((Array.isArray(veri.gecerliKategoriler) ? veri.gecerliKategoriler : []).map((kategori) => String(kategori).trim().slice(0, 80)).filter(Boolean))].slice(0, 30);
@@ -922,10 +950,10 @@ export async function kampanyaKaydet(isletmeId, veri) {
   if (!Number.isFinite(indirimYuzde) || indirimYuzde < 0 || indirimYuzde > 90) throw new Error("İndirim oranı %0–%90 arasında olmalıdır.");
   if (indirimYuzde > 0 && !kategoriler.length) throw new Error("İndirimli kampanya için en az bir kategori seçin.");
   if (kampanyaTipi === "saatli" && (!Number.isInteger(baslangicSaat) || !Number.isInteger(bitisSaat) || baslangicSaat < 0 || bitisSaat > 24 || baslangicSaat >= bitisSaat)) throw new Error("Saatli kampanyada başlangıç ve bitiş saatleri geçersiz.");
-  const alanlar = [etiket, baslik, aciklama, buton, butonTipi, gorsel, ikon, veri.aktif !== false, baslangicSaat, bitisSaat, indirimYuzde, JSON.stringify(kategoriler), kampanyaTipi, sira];
+  const alanlar = [etiket, baslik, aciklama, buton, butonTipi, gorsel, ikon, veri.aktif !== false, baslangicSaat, bitisSaat, indirimYuzde, JSON.stringify(kategoriler), kampanyaTipi, sira, JSON.stringify(ceviriler)];
   const sonuc = id
-    ? await pool.query(`UPDATE kampanyalar SET etiket=$1,baslik=$2,aciklama=$3,buton=$4,buton_tipi=$5,gorsel=$6,ikon=$7,aktif=$8,baslangic_saat=$9,bitis_saat=$10,indirim_yuzde=$11,gecerli_kategoriler=$12::jsonb,kampanya_tipi=$13,sira=$14,guncelleme=NOW() WHERE isletme_id=$15 AND id=$16 RETURNING *`, [...alanlar, tenantId, id])
-    : await pool.query(`INSERT INTO kampanyalar (isletme_id,etiket,baslik,aciklama,buton,buton_tipi,gorsel,ikon,aktif,baslangic_saat,bitis_saat,indirim_yuzde,gecerli_kategoriler,kampanya_tipi,sira) VALUES ($15,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14) RETURNING *`, [...alanlar, tenantId]);
+    ? await pool.query(`UPDATE kampanyalar SET etiket=$1,baslik=$2,aciklama=$3,buton=$4,buton_tipi=$5,gorsel=$6,ikon=$7,aktif=$8,baslangic_saat=$9,bitis_saat=$10,indirim_yuzde=$11,gecerli_kategoriler=$12::jsonb,kampanya_tipi=$13,sira=$14,ceviriler=$15::jsonb,guncelleme=NOW() WHERE isletme_id=$16 AND id=$17 RETURNING *`, [...alanlar, tenantId, id])
+    : await pool.query(`INSERT INTO kampanyalar (isletme_id,etiket,baslik,aciklama,buton,buton_tipi,gorsel,ikon,aktif,baslangic_saat,bitis_saat,indirim_yuzde,gecerli_kategoriler,kampanya_tipi,sira,ceviriler) VALUES ($16,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15::jsonb) RETURNING *`, [...alanlar, tenantId]);
   if (!sonuc.rows.length) throw new Error("Kampanya bulunamadı.");
   return kampanyayiDonustur(sonuc.rows[0]);
 }

@@ -109,6 +109,40 @@ function temaMetniniTemizle(deger) {
     .join("");
 }
 
+const DESTEKLENEN_DILLER = ["tr", "en"];
+
+function dilAyarlariTemizle(girdi, mevcut = {}) {
+  const hamDiller = Array.isArray(girdi?.etkinDiller) ? girdi.etkinDiller : mevcut.etkinDiller;
+  const etkinDiller = [...new Set((Array.isArray(hamDiller) ? hamDiller : DESTEKLENEN_DILLER)
+    .map((dil) => String(dil).trim().toLowerCase())
+    .filter((dil) => DESTEKLENEN_DILLER.includes(dil)))];
+  if (!etkinDiller.includes("tr")) etkinDiller.unshift("tr");
+  const varsayilanDilHam = String(girdi?.varsayilanDil || mevcut.varsayilanDil || "tr").trim().toLowerCase();
+  return { etkinDiller, varsayilanDil: etkinDiller.includes(varsayilanDilHam) ? varsayilanDilHam : "tr" };
+}
+
+function metinCevirileriTemizle(girdi, mevcut = {}) {
+  if (girdi == null) return mevcut;
+  if (typeof girdi !== "object" || Array.isArray(girdi)) throw new Error("Tema metin çevirileri geçersiz.");
+  const sonuc = { ...mevcut };
+  for (const alan of TEMA_METIN_ALANLARI) {
+    if (!(alan in girdi)) continue;
+    const dilDegerleri = girdi[alan];
+    if (!dilDegerleri || typeof dilDegerleri !== "object" || Array.isArray(dilDegerleri)) {
+      delete sonuc[alan];
+      continue;
+    }
+    const temiz = {};
+    for (const dil of DESTEKLENEN_DILLER) {
+      const metin = temaMetniniTemizle(dilDegerleri[dil]);
+      if (metin) temiz[dil] = metin;
+    }
+    if (Object.keys(temiz).length) sonuc[alan] = temiz;
+    else delete sonuc[alan];
+  }
+  return sonuc;
+}
+
 export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
   if (!girdi || typeof girdi !== "object" || Array.isArray(girdi)) throw new Error("Tema bilgisi geçersiz.");
   const konsept = String(girdi.konsept || mevcutIsletme.konsept || "burger").trim().toLowerCase();
@@ -138,6 +172,8 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
       else delete metinler[alan];
     }
   }
+  const metinCevirileri = metinCevirileriTemizle(girdi.metinCevirileri, mevcutTema.metinCevirileri || {});
+  const dilAyarlari = dilAyarlariTemizle(girdi.dilAyarlari, mevcutTema.dilAyarlari || {});
 
   let tumuGorseli = mevcutTema.tumuGorseli || null;
   if (girdi.tumuGorseli !== undefined) {
@@ -184,6 +220,8 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
       ozelPalet: girdi.ozelPalet == null ? mevcutTema.ozelPalet === true : girdi.ozelPalet === true,
       renkler,
       metinler,
+      metinCevirileri,
+      dilAyarlari,
       gorunum,
       logoOlcegi: Math.round(logoOlcegi),
       logoKonumX: Math.round(logoKonumX),
@@ -205,6 +243,8 @@ export function temaCoz(isletme) {
       : { ...varsayilan.renkler },
     font: { ...varsayilan.font, ...(ozel.font || {}) },
     metinler: { ...varsayilan.metinler, ...(ozel.metinler || {}) },
+    metinCevirileri: ozel.metinCevirileri || {},
+    dilAyarlari: dilAyarlariTemizle(null, ozel.dilAyarlari || {}),
     ozelPalet: ozel.ozelPalet === true,
     gorunum: ozel.gorunum === "acik" ? "acik" : "koyu",
     tumuGorseli: ozel.tumuGorseli || null,
