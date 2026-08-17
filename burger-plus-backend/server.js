@@ -124,6 +124,7 @@ import {
   sikayetTablosunuHazirla, musteriSikayetleriniGetir, sikayetOlustur,
   adminSikayetleriniGetir, adminSikayetGuncelle,
 } from "./sikayetDb.js";
+import { rezervasyonTablosunuHazirla, rezervasyonlariGetir, rezervasyonOlustur, rezervasyonGuncelle, rezervasyonSil } from "./rezervasyonDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -481,6 +482,12 @@ app.patch("/api/personel/personel-cagrilari/:id", rolMiddleware(["salon", "kasiy
     res.json({ cagri });
   } catch (e) { res.status(400).json({ hata: e.message || "Çağrı güncellenemedi." }); }
 });
+
+const rezervasyonRolu = () => rolMiddleware(["salon", "kasiyer"]);
+app.get("/api/personel/rezervasyonlar", rezervasyonRolu(), async (req, res) => res.json({ rezervasyonlar: await rezervasyonlariGetir(req.isletme.id, pool, req.query) }));
+app.post("/api/personel/rezervasyonlar", rezervasyonRolu(), async (req, res) => { try { res.status(201).json({ rezervasyon: await rezervasyonOlustur(req.isletme.id,pool,req.body,req.kullanici?.id) }); } catch(e){ res.status(e.status||400).json({hata:e.message||"Rezervasyon oluşturulamadı."}); } });
+app.patch("/api/personel/rezervasyonlar/:id", rezervasyonRolu(), async (req,res)=>{try{res.json({rezervasyon:await rezervasyonGuncelle(req.isletme.id,pool,req.params.id,req.body,req.kullanici?.id)});}catch(e){res.status(e.status||400).json({hata:e.message||"Rezervasyon güncellenemedi."});}});
+app.delete("/api/personel/rezervasyonlar/:id", rezervasyonRolu(), async (req,res)=>{try{await rezervasyonSil(req.isletme.id,pool,req.params.id);res.status(204).end();}catch(e){res.status(e.status||400).json({hata:e.message||"Rezervasyon silinemedi."});}});
 
 app.get("/api/mutfak", rolMiddleware(["mutfak", "salon", "kasiyer"]), async (req, res) => {
   res.json(await tumAcikMasalar(req.isletme.id));
@@ -1458,6 +1465,7 @@ isletmeTablosunuHazirla()
   .then(() => cuzdanTablolariHazirla(pool))
   .then(() => personelCagriTablolariHazirla(pool))
   .then(() => sikayetTablosunuHazirla(pool))
+  .then(() => rezervasyonTablosunuHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
   .then(() => ilkSuperAdminiHazirla())
