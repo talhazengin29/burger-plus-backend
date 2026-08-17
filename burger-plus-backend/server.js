@@ -76,7 +76,10 @@ import {
   personelKayitlariniGetir,
   kurulumAyarlariGetir,
 } from "./adminDb.js";
-import { gorselYukle, logoYukle, storageDosyasiniSil } from "./storage.js";
+import {
+  gorselYukle, logoYukle, storageDosyasiniSil,
+  sikayetGorseliYukle, sikayetGorseliKullaniciyaAitMi,
+} from "./storage.js";
 import { temaCoz } from "./konseptler.js";
 import {
   kayitOl, girisYap, girisYapGenel, korumaliMiddleware, adminMiddleware, rolMiddleware,
@@ -117,6 +120,10 @@ import {
   masaPersonelCagrisiOlustur, aktifPersonelCagrilariniGetir,
   personelCagrisiDurumGuncelle, masaCagriOturumlariniKapat,
 } from "./personelCagriDb.js";
+import {
+  sikayetTablosunuHazirla, musteriSikayetleriniGetir, sikayetOlustur,
+  adminSikayetleriniGetir, adminSikayetGuncelle,
+} from "./sikayetDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -211,6 +218,10 @@ const personelCagriOturumLimiti = rateLimit({
 const personelCagriLimiti = rateLimit({
   windowMs: 10 * 60_000, limit: URETIM ? 120 : 300, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla personel çağrısı gönderildi. Lütfen bir süre bekleyin." },
+});
+const sikayetLimiti = rateLimit({
+  windowMs: 15 * 60_000, limit: URETIM ? 60 : 180, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla geri bildirim isteği gönderildi. Lütfen kısa süre sonra tekrar deneyin." },
 });
 
 const httpServer = createServer(app);
@@ -678,6 +689,36 @@ const nakitDegisikliginiYayinla = (tenantId, masaNo, siparis = null) => {
   }
 };
 
+app.get("/api/sikayetlerim", korumaliMiddleware(), async (req, res) => {
+  try {
+    res.json({ sikayetler: await musteriSikayetleriniGetir(req.isletme.id, pool, req.kullanici.id) });
+  } catch (e) { res.status(400).json({ hata: e.message || "Şikayetler alınamadı." }); }
+});
+
+app.post(
+  "/api/sikayet-gorseli",
+  sikayetLimiti,
+  korumaliMiddleware(),
+  express.raw({ type: ["image/png", "image/jpeg", "image/webp"], limit: "5mb" }),
+  async (req, res) => {
+    try {
+      const gorselUrl = await sikayetGorseliYukle(req.body, req.isletme.id, req.kullanici.id, req.headers["content-type"]);
+      res.status(201).json({ gorselUrl });
+    } catch (e) { res.status(400).json({ hata: e.message || "Görsel yüklenemedi." }); }
+  }
+);
+
+app.post("/api/sikayetler", sikayetLimiti, korumaliMiddleware(), async (req, res) => {
+  try {
+    if (!sikayetGorseliKullaniciyaAitMi(req.body?.gorselUrl, req.isletme.id, req.kullanici.id)) {
+      return res.status(400).json({ hata: "Şikayet görseli bu kullanıcıya ait değil." });
+    }
+    const sikayet = await sikayetOlustur(req.isletme.id, pool, req.kullanici.id, req.body || {});
+    io.to(oda(req.isletme.id, "yonetim")).emit("sikayetler-guncellendi", { id: sikayet.id, durum: sikayet.durum });
+    res.status(201).json({ sikayet });
+  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Şikayet gönderilemedi." }); }
+});
+
 app.get("/api/nakit/masa/:masaNo/durum", guvenli(async (req, res) => {
   const masaNo = guvenliMasaNo(req.params.masaNo);
   if (!masaNo) return res.status(400).json({ hata: "Masa numarasi gecersiz." });
@@ -967,6 +1008,14 @@ app.use("/api/admin", (req, res, next) => {
 });
 
 app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
+app.get("/api/admin/sikayetler", admin, guvenli(async (req) => ({
+  sikayetler: await adminSikayetleriniGetir(req.isletme.id, pool, req.query?.durum),
+})));
+app.patch("/api/admin/sikayetler/:id", admin, guvenli(async (req) => {
+  const sikayet = await adminSikayetGuncelle(req.isletme.id, pool, req.params.id, req.body || {}, req.kullanici?.id);
+  io.to(oda(req.isletme.id, "yonetim")).emit("sikayetler-guncellendi", { id: sikayet.id, durum: sikayet.durum });
+  return { sikayet };
+}));
 app.get("/api/admin/ben", admin, (req, res) => res.json({ kullanici: req.kullanici, impersonation: req.impersonation || null }));
 app.get("/api/admin/kurulum-ayarlari", admin, guvenli((req) => kurulumAyarlariGetir(req.isletme.id)));
 app.post("/api/admin/masa-erisim-tokenlari", admin, guvenli(async (req) => {
@@ -1408,6 +1457,7 @@ isletmeTablosunuHazirla()
   .then(() => sadakatTablolariHazirla(varsayilanIsletmeId, pool))
   .then(() => cuzdanTablolariHazirla(pool))
   .then(() => personelCagriTablolariHazirla(pool))
+  .then(() => sikayetTablosunuHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
   .then(() => ilkSuperAdminiHazirla())
