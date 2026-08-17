@@ -24,7 +24,7 @@ export function rezervasyonVerisiniDogrula(ham = {}, { kismi = false } = {}) {
 }
 
 function kaydiDonustur(kayit) {
-  return kayit && { id: kayit.id, musteriAdi: kayit.musteri_adi, telefon: kayit.telefon || "", tarih: String(kayit.tarih).slice(0, 10), saat: String(kayit.saat).slice(0, 5), masaNo: kayit.masa_no, kisiSayisi: kayit.kisi_sayisi, sureDakika: kayit.sure_dakika, not: kayit.not || "", durum: kayit.durum, olusturma: kayit.olusturma, guncelleme: kayit.guncelleme, personelAdi: kayit.personel_adi || null };
+  return kayit && { id: kayit.id, musteriAdi: kayit.musteri_adi, telefon: kayit.telefon || "", tarih: String(kayit.tarih).slice(0, 10), saat: String(kayit.saat).slice(0, 5), masaNo: kayit.masa_no, kisiSayisi: kayit.kisi_sayisi, sureDakika: kayit.sure_dakika, not: kayit.notlar || "", durum: kayit.durum, olusturma: kayit.olusturma, guncelleme: kayit.guncelleme, personelAdi: kayit.personel_adi || null };
 }
 
 export async function rezervasyonTablosunuHazirla(pool) {
@@ -32,7 +32,7 @@ export async function rezervasyonTablosunuHazirla(pool) {
     id UUID PRIMARY KEY, isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
     musteri_adi TEXT NOT NULL, telefon TEXT, tarih DATE NOT NULL, saat TIME NOT NULL, masa_no TEXT NOT NULL,
     kisi_sayisi INTEGER NOT NULL CHECK (kisi_sayisi BETWEEN 1 AND 100),
-    sure_dakika INTEGER NOT NULL DEFAULT 120 CHECK (sure_dakika BETWEEN 30 AND 480), not TEXT,
+    sure_dakika INTEGER NOT NULL DEFAULT 120 CHECK (sure_dakika BETWEEN 30 AND 480), notlar TEXT,
     durum TEXT NOT NULL DEFAULT 'bekliyor' CHECK (durum IN ('bekliyor','geldi','tamamlandi','gelmedi','iptal')),
     personel_id INTEGER REFERENCES kullanicilar(id) ON DELETE SET NULL,
     olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(), guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW());
@@ -58,7 +58,7 @@ export async function rezervasyonOlustur(isletmeId, pool, ham, personelId) {
   const veri = rezervasyonVerisiniDogrula(ham); const client = await pool.connect();
   try { await client.query("BEGIN"); await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`rezervasyon:${isletmeId}:${veri.tarih}:${veri.masaNo}`]);
     if (await cakismaVarMi(client,isletmeId,veri)) throw new Error("Bu masa seçilen saat aralığında başka bir rezervasyona ayrılmış.");
-    const sonuc = await client.query(`INSERT INTO rezervasyonlar(id,isletme_id,musteri_adi,telefon,tarih,saat,masa_no,kisi_sayisi,sure_dakika,not,durum,personel_id)
+    const sonuc = await client.query(`INSERT INTO rezervasyonlar(id,isletme_id,musteri_adi,telefon,tarih,saat,masa_no,kisi_sayisi,sure_dakika,notlar,durum,personel_id)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [randomUUID(),isletmeId,veri.musteriAdi,veri.telefon||null,veri.tarih,veri.saat,veri.masaNo,veri.kisiSayisi,veri.sureDakika,veri.not||null,veri.durum,personelId||null]);
     await client.query("COMMIT"); return kaydiDonustur(sonuc.rows[0]);
   } catch(e){ await client.query("ROLLBACK").catch(()=>{}); throw e; } finally { client.release(); }
@@ -68,7 +68,7 @@ export async function rezervasyonGuncelle(isletmeId, pool, id, ham, personelId) 
   try { await client.query("BEGIN"); const bulunan=await client.query("SELECT * FROM rezervasyonlar WHERE id=$1 AND isletme_id=$2 FOR UPDATE",[id,isletmeId]);
     if(!bulunan.rows[0]){const e=new Error("Rezervasyon bulunamadı.");e.status=404;throw e;} const veri={...kaydiDonustur(bulunan.rows[0]),...degisiklik};
     if(["bekliyor","geldi"].includes(veri.durum)){await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`rezervasyon:${isletmeId}:${veri.tarih}:${veri.masaNo}`]);if(await cakismaVarMi(client,isletmeId,veri,id))throw new Error("Bu masa seçilen saat aralığında başka bir rezervasyona ayrılmış.");}
-    const sonuc=await client.query(`UPDATE rezervasyonlar SET musteri_adi=$1,telefon=$2,tarih=$3,saat=$4,masa_no=$5,kisi_sayisi=$6,sure_dakika=$7,not=$8,durum=$9,personel_id=$10,guncelleme=NOW() WHERE id=$11 AND isletme_id=$12 RETURNING *`,[veri.musteriAdi,veri.telefon||null,veri.tarih,veri.saat,veri.masaNo,veri.kisiSayisi,veri.sureDakika,veri.not||null,veri.durum,personelId||null,id,isletmeId]);
+    const sonuc=await client.query(`UPDATE rezervasyonlar SET musteri_adi=$1,telefon=$2,tarih=$3,saat=$4,masa_no=$5,kisi_sayisi=$6,sure_dakika=$7,notlar=$8,durum=$9,personel_id=$10,guncelleme=NOW() WHERE id=$11 AND isletme_id=$12 RETURNING *`,[veri.musteriAdi,veri.telefon||null,veri.tarih,veri.saat,veri.masaNo,veri.kisiSayisi,veri.sureDakika,veri.not||null,veri.durum,personelId||null,id,isletmeId]);
     await client.query("COMMIT");return kaydiDonustur(sonuc.rows[0]);
   }catch(e){await client.query("ROLLBACK").catch(()=>{});throw e;}finally{client.release();}
 }
