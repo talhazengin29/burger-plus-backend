@@ -81,6 +81,7 @@ import {
   sikayetGorseliYukle, sikayetGorseliKullaniciyaAitMi,
 } from "./storage.js";
 import { temaCoz } from "./konseptler.js";
+import { i18nTablosunuHazirla, i18nSozlugunuGetir, i18nTumSozlukleriGetir, i18nSozlugunuKaydet } from "./i18nDb.js";
 import {
   kayitOl, girisYap, girisYapGenel, korumaliMiddleware, adminMiddleware, rolMiddleware,
   opsiyonelKullaniciMiddleware, tokenDogrula,
@@ -505,6 +506,12 @@ app.get("/api/oneriler", async (req, res) => {
 app.get("/api/kategoriler", async (req, res) => {
   res.json({ kategoriler: await kategorileriGetir(req.isletme.id) });
 });
+app.get("/api/i18n", guvenli(async (req, res) => {
+  const dil = String(req.query.dil || "tr").trim().toLowerCase();
+  const sonuc = await i18nSozlugunuGetir(pool, req.isletme.id, dil);
+  res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+  return { dil, ...sonuc };
+}));
 app.get("/api/duyurular", async (req, res) => {
   res.json({ duyurular: await duyurulariGetir(req.isletme.id) });
 });
@@ -1040,6 +1047,12 @@ app.put("/api/admin/tema", admin, guvenli(async (req) => {
   io.to(oda(req.isletme.id, "genel")).emit("tema-guncellendi", yanit);
   return yanit;
 }));
+app.get("/api/admin/i18n", admin, guvenli(async (req) => i18nTumSozlukleriGetir(pool, req.isletme.id)));
+app.put("/api/admin/i18n", admin, guvenli(async (req) => {
+  const sonuc = await i18nSozlugunuKaydet(pool, req.isletme.id, req.body);
+  io.to(oda(req.isletme.id, "genel")).emit("i18n-guncellendi", { isletmeSlug: req.isletme.slug });
+  return sonuc;
+}));
 app.post(
   "/api/admin/logo",
   admin,
@@ -1461,6 +1474,7 @@ isletmeTablosunuHazirla()
     return tablolariHazirla(varsayilanIsletmeId);
   })
   .then(() => adminTablolariHazirla(varsayilanIsletmeId))
+  .then(() => i18nTablosunuHazirla(pool))
   .then(() => sadakatTablolariHazirla(varsayilanIsletmeId, pool))
   .then(() => cuzdanTablolariHazirla(pool))
   .then(() => personelCagriTablolariHazirla(pool))
