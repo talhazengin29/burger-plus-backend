@@ -1666,7 +1666,10 @@ function kullaniciDonustur(kullanici) {
 export async function kullaniciSiparisleriniGetir(isletmeId, kullaniciId) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await pool.query(
-    `SELECT * FROM kullanici_siparisleri WHERE isletme_id=$1 AND kullanici_id=$2 ORDER BY olusturma DESC LIMIT 200`,
+    `SELECT ks.*, (d.id IS NOT NULL) AS degerlendirildi, d.genel_puan AS degerlendirme_puani
+     FROM kullanici_siparisleri ks
+     LEFT JOIN siparis_degerlendirmeleri d ON d.isletme_id=ks.isletme_id AND d.siparis_id=ks.id
+     WHERE ks.isletme_id=$1 AND ks.kullanici_id=$2 ORDER BY ks.olusturma DESC LIMIT 200`,
     [tenantId, kullaniciId]
   );
   return sonuc.rows.map(kullaniciSiparisiniDonustur);
@@ -1683,6 +1686,8 @@ function kullaniciSiparisiniDonustur(siparis) {
     kazanilanPuan: Number(siparis.kazanilan_puan),
     durum: siparis.durum,
     tamamlandi: siparis.tamamlandi,
+    degerlendirildi: siparis.degerlendirildi === true,
+    degerlendirmePuani: siparis.degerlendirme_puani == null ? null : Number(siparis.degerlendirme_puani),
     tarih: siparis.olusturma,
   };
 }

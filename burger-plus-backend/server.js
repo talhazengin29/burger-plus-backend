@@ -126,6 +126,7 @@ import {
 } from "./sikayetDb.js";
 import { rezervasyonTablosunuHazirla, rezervasyonlariGetir, rezervasyonOlustur, rezervasyonGuncelle, rezervasyonSil } from "./rezervasyonDb.js";
 import { salonKrokisiniGetir, salonKrokisiniKaydet } from "./salonKrokiDb.js";
+import { degerlendirmeTablolariniHazirla, siparisDegerlendirmesiOlustur, adminDegerlendirmeRaporunuGetir } from "./degerlendirmeDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -379,6 +380,13 @@ app.post("/api/profil", korumaliMiddleware(), async (req, res) => {
 
 app.get("/api/siparislerim", korumaliMiddleware(), async (req, res) => {
   res.json({ siparisler: await kullaniciSiparisleriniGetir(req.isletme.id, req.kullanici.id) });
+});
+app.post("/api/siparislerim/:id/degerlendirme", korumaliMiddleware(), async (req, res) => {
+  try {
+    const degerlendirme = await siparisDegerlendirmesiOlustur(req.isletme.id, req.kullanici.id, req.params.id, req.body || {}, pool);
+    io.to(oda(req.isletme.id, "yonetim")).emit("degerlendirmeler-guncellendi", { id: degerlendirme.id });
+    res.status(201).json({ degerlendirme });
+  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Değerlendirme kaydedilemedi." }); }
 });
 
 app.get("/api/sadakat", korumaliMiddleware(), async (req, res) => {
@@ -1019,6 +1027,9 @@ app.use("/api/admin", (req, res, next) => {
 });
 
 app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
+app.get("/api/admin/degerlendirmeler", admin, guvenli(async (req) => ({
+  rapor: await adminDegerlendirmeRaporunuGetir(req.isletme.id, pool, req.query?.gun),
+})));
 app.get("/api/admin/salon-krokisi", admin, guvenli(async (req) => ({ kroki: await salonKrokisiniGetir(req.isletme.id, pool) })));
 app.put("/api/admin/salon-krokisi", admin, guvenli(async (req) => {
   const kroki = await salonKrokisiniKaydet(req.isletme.id, pool, req.body?.kroki || req.body);
@@ -1476,6 +1487,7 @@ isletmeTablosunuHazirla()
   .then(() => personelCagriTablolariHazirla(pool))
   .then(() => sikayetTablosunuHazirla(pool))
   .then(() => rezervasyonTablosunuHazirla(pool))
+  .then(() => degerlendirmeTablolariniHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
   .then(() => ilkSuperAdminiHazirla())
