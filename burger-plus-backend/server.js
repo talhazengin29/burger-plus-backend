@@ -125,6 +125,7 @@ import {
   adminSikayetleriniGetir, adminSikayetGuncelle,
 } from "./sikayetDb.js";
 import { rezervasyonTablosunuHazirla, rezervasyonlariGetir, rezervasyonOlustur, rezervasyonGuncelle, rezervasyonSil } from "./rezervasyonDb.js";
+import { salonKrokisiniGetir, salonKrokisiniKaydet } from "./salonKrokiDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -488,6 +489,9 @@ app.get("/api/personel/rezervasyonlar", rezervasyonRolu(), async (req, res) => r
 app.post("/api/personel/rezervasyonlar", rezervasyonRolu(), async (req, res) => { try { res.status(201).json({ rezervasyon: await rezervasyonOlustur(req.isletme.id,pool,req.body,req.kullanici?.id) }); } catch(e){ res.status(e.status||400).json({hata:e.message||"Rezervasyon oluşturulamadı."}); } });
 app.patch("/api/personel/rezervasyonlar/:id", rezervasyonRolu(), async (req,res)=>{try{res.json({rezervasyon:await rezervasyonGuncelle(req.isletme.id,pool,req.params.id,req.body,req.kullanici?.id)});}catch(e){res.status(e.status||400).json({hata:e.message||"Rezervasyon güncellenemedi."});}});
 app.delete("/api/personel/rezervasyonlar/:id", rezervasyonRolu(), async (req,res)=>{try{await rezervasyonSil(req.isletme.id,pool,req.params.id);res.status(204).end();}catch(e){res.status(e.status||400).json({hata:e.message||"Rezervasyon silinemedi."});}});
+app.get("/api/personel/salon-krokisi", rezervasyonRolu(), async (req, res) => {
+  res.json({ kroki: await salonKrokisiniGetir(req.isletme.id, pool) });
+});
 
 app.get("/api/mutfak", rolMiddleware(["mutfak", "salon", "kasiyer"]), async (req, res) => {
   res.json(await tumAcikMasalar(req.isletme.id));
@@ -1015,6 +1019,12 @@ app.use("/api/admin", (req, res, next) => {
 });
 
 app.get("/api/admin/dashboard", admin, guvenli((req) => dashboardGetir(req.isletme.id)));
+app.get("/api/admin/salon-krokisi", admin, guvenli(async (req) => ({ kroki: await salonKrokisiniGetir(req.isletme.id, pool) })));
+app.put("/api/admin/salon-krokisi", admin, guvenli(async (req) => {
+  const kroki = await salonKrokisiniKaydet(req.isletme.id, pool, req.body?.kroki || req.body);
+  io.to(oda(req.isletme.id, "salon")).emit("salon-krokisi-guncellendi", kroki);
+  return { kroki };
+}));
 app.get("/api/admin/sikayetler", admin, guvenli(async (req) => ({
   sikayetler: await adminSikayetleriniGetir(req.isletme.id, pool, req.query?.durum),
 })));
