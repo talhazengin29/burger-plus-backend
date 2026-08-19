@@ -1274,7 +1274,7 @@ async function onaylananOdemeyiMutfagaAktar(odeme) {
     io.to(oda(tenantId, "salon")).emit("salon-guncellendi", tumMasalar);
     io.to(oda(tenantId, "yonetim")).emit("yonetim-satis-guncellendi", {
       siparisNo: odeme.siparisNo,
-      masaNo: odeme.masaNo || "Al Götür",
+      masaNo: odeme.masaNo || "algotur",
       kisiAdi: odeme.kisiAdi,
       tutar: odeme.tutar,
       urunAdedi: odeme.urunler.reduce((toplam, urun) => toplam + Math.max(1, Number(urun.adet || 1)), 0),
