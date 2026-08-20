@@ -1500,6 +1500,11 @@ async function mevcutCevirileriArkaPlandaTamamla() {
     try {
       const ozet = await eksikCevirileriTamamla(satir.id);
       const sadakat = await sadakatCevirisiniTamamla(satir.id, pool);
+      io.to(oda(satir.id, "genel")).emit("urunler-guncellendi", await urunleriGetir(satir.id));
+      io.to(oda(satir.id, "genel")).emit("kategoriler-guncellendi", await kategorileriGetir(satir.id));
+      io.to(oda(satir.id, "genel")).emit("kampanyalar-guncellendi", await kampanyalariGetir(satir.id));
+      io.to(oda(satir.id, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(satir.id));
+      io.to(oda(satir.id, "genel")).emit("sadakat-ayari-guncellendi", await sadakatAyariniGetir(satir.id, pool));
       console.log(`AI ceviri taramasi bitti -> isletme ${satir.id}`, {
         ...ozet,
         sadakat: sadakat.durum,
