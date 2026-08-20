@@ -121,7 +121,22 @@ export function ceviriYapilandirmasi() {
   };
 }
 
-export async function ingilizceCeviriUret(varlikTuru, kaynak, onceki = null, { fetchImpl = fetch } = {}) {
+async function openAiIleTekrarDeneyerekCevir(varlikTuru, metinler, fetchImpl, retryDelayMs) {
+  let sonHata;
+  for (let deneme = 0; deneme < 3; deneme += 1) {
+    try {
+      return await openAiIleCevir(varlikTuru, metinler, fetchImpl);
+    } catch (hata) {
+      sonHata = hata;
+      if (deneme < 2 && retryDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (2 ** deneme)));
+      }
+    }
+  }
+  throw sonHata;
+}
+
+export async function ingilizceCeviriUret(varlikTuru, kaynak, onceki = null, { fetchImpl = fetch, retryDelayMs = 750 } = {}) {
   const hash = kaynakHash(kaynak);
   if (onceki?.kaynakHash === hash && onceki?.durum === "hazir" && onceki?.en) return onceki;
   const ayniKaynaginOncekiCevirisi = onceki?.kaynakHash === hash ? onceki?.en || {} : {};
@@ -133,7 +148,7 @@ export async function ingilizceCeviriUret(varlikTuru, kaynak, onceki = null, { f
   }
 
   try {
-    const ceviriler = await openAiIleCevir(varlikTuru, metinler, fetchImpl);
+    const ceviriler = await openAiIleTekrarDeneyerekCevir(varlikTuru, metinler, fetchImpl, retryDelayMs);
     const beklenen = new Set(metinler.map(({ key }) => key));
     const gelen = new Map(ceviriler.map(({ key, text }) => [key, String(text || "").trim()]));
     if (gelen.size !== beklenen.size || [...beklenen].some((key) => !gelen.get(key))) {

@@ -14,6 +14,34 @@ test("çeviri kaynağını kararlı anahtarlarla düzleştirip geri kurar", () =
   assert.equal(hedef.malzemeler[1], "Hot sauce");
 });
 
+test("temporary OpenAI errors are retried for new content", async () => {
+  const oncekiAnahtar = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  let deneme = 0;
+  try {
+    const sonuc = await ingilizceCeviriUret("urun", { ad: "Diyet Tost", aciklama: "Beyaz peynir ve domates" }, null, {
+      retryDelayMs: 0,
+      fetchImpl: async () => {
+        deneme += 1;
+        if (deneme < 3) throw new Error("temporary network error");
+        return {
+          ok: true,
+          json: async () => ({ output_text: JSON.stringify({ translations: [
+            { key: "ad", text: "Diet Toast" },
+            { key: "aciklama", text: "White cheese and tomato" },
+          ] }) }),
+        };
+      },
+    });
+    assert.equal(deneme, 3);
+    assert.equal(sonuc.durum, "hazir");
+    assert.equal(sonuc.en.aciklama, "White cheese and tomato");
+  } finally {
+    if (oncekiAnahtar) process.env.OPENAI_API_KEY = oncekiAnahtar;
+    else delete process.env.OPENAI_API_KEY;
+  }
+});
+
 test("API anahtarı yoksa Türkçe kaydı engellemeden bekliyor durumuna geçer", async () => {
   const oncekiAnahtar = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
