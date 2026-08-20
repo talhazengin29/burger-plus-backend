@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { ingilizceCeviriUret } from "./ceviri.js";
 
 const BURGER_DAMGA_HEDEFI = 5;
 const UUID_DESENI = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -33,6 +34,8 @@ export async function sadakatAyariniGetir(isletmeId, veritabani) {
     damgaBirimi: String(ayar.damgaBirimi || "ürün").trim().slice(0, 40) || "ürün",
     tamamlanmaMetni: String(ayar.tamamlanmaMetni || "Hediyen hazır!").trim().slice(0, 80) || "Hediyen hazır!",
     ikon: String(ayar.ikon || "★").trim().slice(0, 16) || "★",
+    ceviriler: { en: ayar.ceviriler?.en || {} },
+    ceviriDurumu: ayar.ceviriler?.durum || "bekliyor",
   };
 }
 
@@ -85,6 +88,18 @@ export async function adminSadakatAyariniKaydet(isletmeId, pool, veri) {
     tamamlanmaMetni: String(veri?.tamamlanmaMetni || "").trim().slice(0, 80) || "Hediyen hazır!",
     ikon: String(veri?.ikon || "").trim().slice(0, 16) || "★",
   };
+  const oncekiHamAyar = (await pool.query(
+    "SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='sadakat_kurulum_v1'",
+    [tenantId]
+  )).rows[0]?.deger || {};
+  ayar.ceviriler = await ingilizceCeviriUret("sadakat", {
+    odulMetni: ayar.odulMetni,
+    kartEtiketi: ayar.kartEtiketi,
+    baslik: ayar.baslik,
+    aciklama: ayar.aciklama,
+    damgaBirimi: ayar.damgaBirimi,
+    tamamlanmaMetni: ayar.tamamlanmaMetni,
+  }, oncekiHamAyar.ceviriler);
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");

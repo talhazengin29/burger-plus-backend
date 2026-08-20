@@ -31,6 +31,22 @@ PGDATABASE=burger_plus
 PORT=4000
 ```
 
+### AI destekli müşteri menüsü çevirisi
+
+Ürün, kategori, kampanya, duyuru ve sadakat metinleri kaydedilirken İngilizce
+çeviri üretmek için yalnızca backend ortamına aşağıdaki değişkenleri ekle:
+
+```env
+OPENAI_API_KEY=sk-...
+OPENAI_TRANSLATION_MODEL=gpt-5-mini
+```
+
+Çeviriler her müşteri isteğinde yeniden üretilmez; PostgreSQL içinde saklanır.
+Türkçe kaynak değişmediyse tekrar API çağrısı yapılmaz. Mevcut kayıtları veya
+hata alan çevirileri yeniden işlemek için admin yetkisiyle bir kez
+`POST /api/admin/ceviriler/tamamla` çağrılabilir. Anahtar yoksa Türkçe içerik
+kaydedilmeye devam eder ve İngilizce ekran güvenli biçimde Türkçeye düşer.
+
 ### 3. Çalıştır
 ```bash
 npm install

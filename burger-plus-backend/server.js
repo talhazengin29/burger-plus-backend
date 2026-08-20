@@ -75,7 +75,9 @@ import {
   musteriKayitlariniGetir,
   personelKayitlariniGetir,
   kurulumAyarlariGetir,
+  eksikCevirileriTamamla,
 } from "./adminDb.js";
+import { ceviriYapilandirmasi } from "./ceviri.js";
 import {
   gorselYukle, logoYukle, storageDosyasiniSil,
   sikayetGorseliYukle, sikayetGorseliKullaniciyaAitMi,
@@ -1171,6 +1173,21 @@ app.delete("/api/admin/duyurular/:id", admin, guvenli(async (req) => {
   io.to(oda(t, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(t));
 }));
 app.get("/api/admin/kampanyalar", admin, guvenli(async (req) => ({ kampanyalar: await kampanyalariGetir(req.isletme.id, { tumu: true }) })));
+app.get("/api/admin/ceviri-durumu", admin, guvenli(async () => ceviriYapilandirmasi()));
+app.post("/api/admin/ceviriler/tamamla", admin, guvenli(async (req) => {
+  const yapilandirma = ceviriYapilandirmasi();
+  if (!yapilandirma.aktif) {
+    const hata = new Error("AI çevirisi için OPENAI_API_KEY tanımlanmalıdır.");
+    hata.status = 503;
+    throw hata;
+  }
+  const ozet = await eksikCevirileriTamamla(req.isletme.id);
+  io.to(oda(req.isletme.id, "genel")).emit("urunler-guncellendi", await urunleriGetir(req.isletme.id));
+  io.to(oda(req.isletme.id, "genel")).emit("kategoriler-guncellendi", await kategorileriGetir(req.isletme.id));
+  io.to(oda(req.isletme.id, "genel")).emit("kampanyalar-guncellendi", await kampanyalariGetir(req.isletme.id));
+  io.to(oda(req.isletme.id, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(req.isletme.id));
+  return { ozet };
+}));
 app.post("/api/admin/kampanyalar", admin, guvenli(async (req) => {
   const t = req.isletme.id;
   const eski = req.body.id ? await yonetimVarliginiGetir(t, "kampanya", req.body.id) : null;
