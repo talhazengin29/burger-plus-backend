@@ -114,7 +114,11 @@ async function openAiIleCevir(varlikTuru, metinler, fetchImpl) {
 }
 
 export function ceviriYapilandirmasi() {
-  return { aktif: Boolean(process.env.OPENAI_API_KEY), model: MODEL };
+  return {
+    aktif: Boolean(process.env.OPENAI_API_KEY),
+    model: MODEL,
+    baslangictaTamamla: process.env.OPENAI_TRANSLATION_BACKFILL_ON_START === "true",
+  };
 }
 
 export async function ingilizceCeviriUret(varlikTuru, kaynak, onceki = null, { fetchImpl = fetch } = {}) {

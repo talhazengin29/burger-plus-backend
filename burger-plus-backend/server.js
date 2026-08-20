@@ -97,6 +97,7 @@ import {
   sadakatTablolariHazirla, sadakatOzetiniGetir, puanlaOdulSatinAl,
   kullaniciOdulunuSipariseDonustur, adminOdulleriGetir, adminOdulKaydet, adminOdulArsivle,
   sadakatAyariniGetir, adminSadakatAyariniGetir, adminSadakatAyariniKaydet,
+  sadakatCevirisiniTamamla,
 } from "./sadakatDb.js";
 import {
   cuzdanTablolariHazirla, cuzdanAyariniGetir, adminCuzdanAyariniKaydet,
@@ -1182,11 +1183,12 @@ app.post("/api/admin/ceviriler/tamamla", admin, guvenli(async (req) => {
     throw hata;
   }
   const ozet = await eksikCevirileriTamamla(req.isletme.id);
+  const sadakatCevirisi = await sadakatCevirisiniTamamla(req.isletme.id, pool);
   io.to(oda(req.isletme.id, "genel")).emit("urunler-guncellendi", await urunleriGetir(req.isletme.id));
   io.to(oda(req.isletme.id, "genel")).emit("kategoriler-guncellendi", await kategorileriGetir(req.isletme.id));
   io.to(oda(req.isletme.id, "genel")).emit("kampanyalar-guncellendi", await kampanyalariGetir(req.isletme.id));
   io.to(oda(req.isletme.id, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(req.isletme.id));
-  return { ozet };
+  return { ozet: { ...ozet, sadakat: sadakatCevirisi.durum } };
 }));
 app.post("/api/admin/kampanyalar", admin, guvenli(async (req) => {
   const t = req.isletme.id;
@@ -1490,6 +1492,21 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 4000;
 
+async function mevcutCevirileriArkaPlandaTamamla() {
+  const yapilandirma = ceviriYapilandirmasi();
+  if (!yapilandirma.aktif || !yapilandirma.baslangictaTamamla) return;
+  const sonuc = await pool.query("SELECT id FROM isletmeler WHERE aktif=true ORDER BY id");
+  for (const satir of sonuc.rows) {
+    try {
+      const ozet = await eksikCevirileriTamamla(satir.id);
+      const sadakat = await sadakatCevirisiniTamamla(satir.id, pool);
+      console.log(`AI ceviri tamamlandi -> isletme ${satir.id}`, { ...ozet, sadakat: sadakat.durum });
+    } catch (hata) {
+      console.error(`AI ceviri tamamlanamadi -> isletme ${satir.id}:`, hata.message);
+    }
+  }
+}
+
 // Once tablolari hazirla, sonra sunucuyu baslat.
 // 0.0.0.0: bulut ortamlarinda (Render vb.) disaridan erisim icin gerekli.
 let varsayilanIsletmeId;
@@ -1511,6 +1528,7 @@ isletmeTablosunuHazirla()
   .then(() => {
     httpServer.listen(PORT, "0.0.0.0", () => {
       console.log(`Burger Plus backend calisiyor -> port ${PORT}`);
+      mevcutCevirileriArkaPlandaTamamla().catch((hata) => console.error("AI ceviri taramasi baslatilamadi:", hata.message));
     });
   })
   .catch((err) => {

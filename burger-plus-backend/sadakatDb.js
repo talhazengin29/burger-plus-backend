@@ -55,6 +55,31 @@ export async function adminSadakatAyariniGetir(isletmeId, pool) {
   return { ...ayar, odulUrun };
 }
 
+export async function sadakatCevirisiniTamamla(isletmeId, pool) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const hamSonuc = await pool.query(
+    "SELECT deger FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='sadakat_kurulum_v1'",
+    [tenantId]
+  );
+  const hamAyar = hamSonuc.rows[0]?.deger || {};
+  const ayar = await sadakatAyariniGetir(tenantId, pool);
+  const ceviriler = await ingilizceCeviriUret("sadakat", {
+    odulMetni: ayar.odulMetni,
+    kartEtiketi: ayar.kartEtiketi,
+    baslik: ayar.baslik,
+    aciklama: ayar.aciklama,
+    damgaBirimi: ayar.damgaBirimi,
+    tamamlanmaMetni: ayar.tamamlanmaMetni,
+  }, hamAyar.ceviriler);
+  await pool.query(
+    `INSERT INTO sistem_ayarlari (isletme_id,anahtar,deger,guncelleme)
+     VALUES ($1,'sadakat_kurulum_v1',$2::jsonb,NOW())
+     ON CONFLICT (isletme_id,anahtar) DO UPDATE SET deger=EXCLUDED.deger,guncelleme=NOW()`,
+    [tenantId, JSON.stringify({ ...hamAyar, ceviriler })]
+  );
+  return ceviriler;
+}
+
 export async function adminSadakatAyariniKaydet(isletmeId, pool, veri) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   const hedefAdet = Math.floor(Number(veri?.hedefAdet));

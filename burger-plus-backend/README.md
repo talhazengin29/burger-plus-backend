@@ -39,9 +39,12 @@ PORT=4000
 ```env
 OPENAI_API_KEY=sk-...
 OPENAI_TRANSLATION_MODEL=gpt-5-mini
+OPENAI_TRANSLATION_BACKFILL_ON_START=true
 ```
 
-Çeviriler her müşteri isteğinde yeniden üretilmez; PostgreSQL içinde saklanır.
+`OPENAI_TRANSLATION_BACKFILL_ON_START=true`, daha önce kaydedilmiş içerikleri bir
+sonraki backend açılışında tarar. Çeviriler her müşteri isteğinde yeniden
+üretilmez; PostgreSQL içinde saklanır.
 Türkçe kaynak değişmediyse tekrar API çağrısı yapılmaz. Mevcut kayıtları veya
 hata alan çevirileri yeniden işlemek için admin yetkisiyle bir kez
 `POST /api/admin/ceviriler/tamamla` çağrılabilir. Anahtar yoksa Türkçe içerik
