@@ -1,5 +1,6 @@
 import pool from "./db.js";
-import { KONSEPTLER, temaGirdisiniTemizle } from "./konseptler.js";
+import { KONSEPTLER, temaCoz, temaGirdisiniTemizle } from "./konseptler.js";
+import { ingilizceCeviriUret } from "./ceviri.js";
 
 const TENANT_TABLOLARI = [
   "kullanicilar",
@@ -254,6 +255,7 @@ export async function isletmeOlustur(veri = {}, transactionHazirligi = null) {
   if (ad.length < 2) throw new Error("İşletme adı zorunludur.");
   if (!KONSEPTLER[konsept]) throw new Error("Konsept yalnızca burger, cafe veya pizza olabilir.");
   const temizTema = temaGirdisiniTemizle(veri.tema || {}, { konsept, tema: {} }).tema;
+  temizTema.ceviriler = await ingilizceCeviriUret("tema", { metinler: temaCoz({ konsept, tema: temizTema }).metinler });
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
@@ -289,10 +291,29 @@ export async function isletmeTemasiniGuncelle(isletmeId, girdi = {}) {
   const mevcut = await isletmeIdIleGetir(id);
   if (!mevcut) throw new Error("İşletme bulunamadı.");
   const temiz = temaGirdisiniTemizle(girdi, mevcut);
+  temiz.tema.ceviriler = await ingilizceCeviriUret(
+    "tema",
+    { metinler: temaCoz({ ...mevcut, konsept: temiz.konsept, tema: temiz.tema }).metinler },
+    mevcut.tema?.ceviriler
+  );
   const sonuc = await pool.query(
     `UPDATE isletmeler SET konsept=$2,tema=$3::jsonb WHERE id=$1 RETURNING *`,
     [id, temiz.konsept, JSON.stringify(temiz.tema)]
   );
+  return isletmeDonustur(sonuc.rows[0]);
+}
+
+export async function isletmeTemaCevirisiniTamamla(isletmeId) {
+  const id = isletmeIdDogrula(isletmeId);
+  const mevcut = await isletmeIdIleGetir(id);
+  if (!mevcut) throw new Error("İşletme bulunamadı.");
+  const tema = { ...(mevcut.tema || {}) };
+  tema.ceviriler = await ingilizceCeviriUret(
+    "tema",
+    { metinler: temaCoz(mevcut).metinler },
+    tema.ceviriler
+  );
+  const sonuc = await pool.query("UPDATE isletmeler SET tema=$2::jsonb WHERE id=$1 RETURNING *", [id, JSON.stringify(tema)]);
   return isletmeDonustur(sonuc.rows[0]);
 }
 

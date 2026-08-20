@@ -105,7 +105,7 @@ import {
 } from "./cuzdanDb.js";
 import {
   isletmeTablosunuHazirla, isletmeMigrationunuCalistir, isletmeSlugIleGetir, isletmeIdIleGetir,
-  isletmeOlustur, isletmeTemasiniGuncelle, isletmeLogosunuGuncelle,
+  isletmeOlustur, isletmeTemasiniGuncelle, isletmeLogosunuGuncelle, isletmeTemaCevirisiniTamamla,
 } from "./isletmeDb.js";
 import {
   superAdminTablolariniHazirla, ilkSuperAdminiHazirla,
@@ -876,6 +876,11 @@ app.post("/api/super/isletmeler/kurulum", superAdmin, guvenli(async (req, res) =
     req.body || {},
     req.ip || req.socket.remoteAddress || ""
   );
+  (async () => {
+    await eksikCevirileriTamamla(sonuc.isletme.id);
+    await sadakatCevirisiniTamamla(sonuc.isletme.id, pool);
+    await isletmeTemaCevirisiniTamamla(sonuc.isletme.id);
+  })().catch((hata) => console.error(`Yeni işletme çevirileri tamamlanamadı -> ${sonuc.isletme.id}:`, hata.message));
   // Bu işlem günlüğü kurulum transaction'ı içinde yazıldı; ikinci bir kayıt oluşturma.
   res.locals.denetimAtla = true;
   return sonuc;
@@ -1184,11 +1189,14 @@ app.post("/api/admin/ceviriler/tamamla", admin, guvenli(async (req) => {
   }
   const ozet = await eksikCevirileriTamamla(req.isletme.id);
   const sadakatCevirisi = await sadakatCevirisiniTamamla(req.isletme.id, pool);
+  const temaliIsletme = await isletmeTemaCevirisiniTamamla(req.isletme.id);
   io.to(oda(req.isletme.id, "genel")).emit("urunler-guncellendi", await urunleriGetir(req.isletme.id));
   io.to(oda(req.isletme.id, "genel")).emit("kategoriler-guncellendi", await kategorileriGetir(req.isletme.id));
   io.to(oda(req.isletme.id, "genel")).emit("kampanyalar-guncellendi", await kampanyalariGetir(req.isletme.id));
   io.to(oda(req.isletme.id, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(req.isletme.id));
-  return { ozet: { ...ozet, sadakat: sadakatCevirisi.durum } };
+  io.to(oda(req.isletme.id, "genel")).emit("sadakat-ayari-guncellendi", await sadakatAyariniGetir(req.isletme.id, pool));
+  io.to(oda(req.isletme.id, "genel")).emit("tema-guncellendi", temaliIsletmeYaniti(temaliIsletme));
+  return { ozet: { ...ozet, sadakat: sadakatCevirisi.durum, tema: temaliIsletme.tema?.ceviriler?.durum || "bekliyor" } };
 }));
 app.post("/api/admin/kampanyalar", admin, guvenli(async (req) => {
   const t = req.isletme.id;
@@ -1500,11 +1508,13 @@ async function mevcutCevirileriArkaPlandaTamamla() {
     try {
       const ozet = await eksikCevirileriTamamla(satir.id);
       const sadakat = await sadakatCevirisiniTamamla(satir.id, pool);
+      const temaliIsletme = await isletmeTemaCevirisiniTamamla(satir.id);
       io.to(oda(satir.id, "genel")).emit("urunler-guncellendi", await urunleriGetir(satir.id));
       io.to(oda(satir.id, "genel")).emit("kategoriler-guncellendi", await kategorileriGetir(satir.id));
       io.to(oda(satir.id, "genel")).emit("kampanyalar-guncellendi", await kampanyalariGetir(satir.id));
       io.to(oda(satir.id, "genel")).emit("duyurular-guncellendi", await duyurulariGetir(satir.id));
       io.to(oda(satir.id, "genel")).emit("sadakat-ayari-guncellendi", await sadakatAyariniGetir(satir.id, pool));
+      io.to(oda(satir.id, "genel")).emit("tema-guncellendi", temaliIsletmeYaniti(temaliIsletme));
       console.log(`AI ceviri taramasi bitti -> isletme ${satir.id}`, {
         ...ozet,
         sadakat: sadakat.durum,

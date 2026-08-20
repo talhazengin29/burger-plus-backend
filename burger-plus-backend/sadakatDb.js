@@ -340,6 +340,7 @@ function oduluDonustur(odul) {
     puan: Number(odul.puan || 0),
     urunId: Number(odul.urun_id),
     gorsel: odul.gorsel || null,
+    ceviriler: { en: { ad: odul.urun_ceviriler?.en?.ad || "" } },
   };
 }
 
@@ -355,6 +356,7 @@ function hediyeyiDonustur(hediye) {
     tarih: hediye.olusturma,
     kullanilmaTarihi: hediye.kullanilma || null,
     siparisNo: hediye.siparis_no || null,
+    ceviriler: { en: { ad: hediye.urun_ceviriler?.en?.ad || "" } },
   };
 }
 
@@ -363,7 +365,7 @@ export async function sadakatOzetiniGetir(isletmeId, pool, kullaniciId) {
   const [sadakat, kullanici, oduller, hareketler, hediyeler] = await Promise.all([
     sadakatAyariniGetir(tenantId, pool),
     pool.query("SELECT puan,burger_damga FROM kullanicilar WHERE isletme_id=$1 AND id=$2", [tenantId, kullaniciId]),
-    pool.query(`SELECT o.id,o.ad,o.puan,o.urun_id,o.gorsel FROM oduller o
+    pool.query(`SELECT o.id,o.ad,o.puan,o.urun_id,o.gorsel,u.ceviriler AS urun_ceviriler FROM oduller o
       JOIN urunler u ON u.isletme_id=$1 AND u.id=o.urun_id
       WHERE o.isletme_id=$1 AND o.aktif=true AND o.market_aktif=true AND u.arsivli=false AND u.aktif=true ORDER BY o.puan,o.id`, [tenantId]),
     pool.query(
@@ -372,9 +374,10 @@ export async function sadakatOzetiniGetir(isletmeId, pool, kullaniciId) {
       [tenantId, kullaniciId]
     ),
     pool.query(
-      `SELECT ko.*,o.ad,o.gorsel,oi.siparis_no
+      `SELECT ko.*,o.ad,o.gorsel,u.ceviriler AS urun_ceviriler,oi.siparis_no
        FROM kullanici_odulleri ko
        JOIN oduller o ON o.isletme_id=$1 AND o.id=ko.odul_id
+       JOIN urunler u ON u.isletme_id=$1 AND u.id=o.urun_id
        LEFT JOIN odeme_islemleri oi ON oi.isletme_id=$1 AND oi.id=ko.kullanilan_odeme_id
        WHERE ko.isletme_id=$1 AND ko.kullanici_id=$2 ORDER BY ko.olusturma DESC LIMIT 200`,
       [tenantId, kullaniciId]

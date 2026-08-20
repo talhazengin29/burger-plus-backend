@@ -50,3 +50,17 @@ test("geçersiz uygulama görünümü reddedilir", () => {
     /görünümü/,
   );
 });
+
+test("müşteri temasının hazır İngilizce metinleri API temasına eklenir", () => {
+  const tema = temaCoz({
+    konsept: "burger",
+    tema: {
+      ceviriler: {
+        durum: "hazir",
+        en: { metinler: { slogan: "Delicious Food, Great Experience!" } },
+      },
+    },
+  });
+  assert.equal(tema.ceviriDurumu, "hazir");
+  assert.equal(tema.ceviriler.en.metinler.slogan, "Delicious Food, Great Experience!");
+});

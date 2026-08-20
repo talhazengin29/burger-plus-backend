@@ -205,6 +205,8 @@ export function temaCoz(isletme) {
       : { ...varsayilan.renkler },
     font: { ...varsayilan.font, ...(ozel.font || {}) },
     metinler: { ...varsayilan.metinler, ...(ozel.metinler || {}) },
+    ceviriler: { en: ozel.ceviriler?.en || {} },
+    ceviriDurumu: ozel.ceviriler?.durum || "bekliyor",
     ozelPalet: ozel.ozelPalet === true,
     gorunum: ozel.gorunum === "acik" ? "acik" : "koyu",
     tumuGorseli: ozel.tumuGorseli || null,
