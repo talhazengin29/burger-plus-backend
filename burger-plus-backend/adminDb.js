@@ -1019,7 +1019,7 @@ export async function eksikCevirileriTamamla(isletmeId) {
       kaynak: (satir) => ({ baslik: satir.baslik, mesaj: satir.mesaj }),
     },
   ];
-  const ozet = { toplam: 0, hazir: 0, bekliyor: 0, hata: 0 };
+  const ozet = { toplam: 0, hazir: 0, bekliyor: 0, hata: 0, hataOrnekleri: [] };
   for (const tanim of tanimlar) {
     const sonuc = await pool.query(`SELECT * FROM ${tanim.tablo} WHERE isletme_id=$1 AND arsivli=false ORDER BY id`, [tenantId]);
     for (const satir of sonuc.rows) {
@@ -1027,6 +1027,9 @@ export async function eksikCevirileriTamamla(isletmeId) {
       await pool.query(`UPDATE ${tanim.tablo} SET ceviriler=$1::jsonb,guncelleme=NOW() WHERE isletme_id=$2 AND id=$3`, [JSON.stringify(ceviriler), tenantId, satir.id]);
       ozet.toplam += 1;
       ozet[ceviriler.durum] = (ozet[ceviriler.durum] || 0) + 1;
+      if (ceviriler.durum === "hata" && ceviriler.hata && !ozet.hataOrnekleri.includes(ceviriler.hata) && ozet.hataOrnekleri.length < 3) {
+        ozet.hataOrnekleri.push(ceviriler.hata);
+      }
     }
   }
   return ozet;

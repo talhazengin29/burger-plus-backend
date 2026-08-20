@@ -1500,7 +1500,11 @@ async function mevcutCevirileriArkaPlandaTamamla() {
     try {
       const ozet = await eksikCevirileriTamamla(satir.id);
       const sadakat = await sadakatCevirisiniTamamla(satir.id, pool);
-      console.log(`AI ceviri tamamlandi -> isletme ${satir.id}`, { ...ozet, sadakat: sadakat.durum });
+      console.log(`AI ceviri taramasi bitti -> isletme ${satir.id}`, {
+        ...ozet,
+        sadakat: sadakat.durum,
+        sadakatHatasi: sadakat.hata || undefined,
+      });
     } catch (hata) {
       console.error(`AI ceviri tamamlanamadi -> isletme ${satir.id}:`, hata.message);
     }

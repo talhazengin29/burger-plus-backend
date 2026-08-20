@@ -104,7 +104,8 @@ async function openAiIleCevir(varlikTuru, metinler, fetchImpl) {
     });
     if (!yanit.ok) {
       const hataMetni = await yanit.text();
-      throw new Error(`OpenAI çeviri isteği başarısız (${yanit.status}): ${hataMetni.slice(0, 300)}`);
+      const istekId = yanit.headers?.get?.("x-request-id");
+      throw new Error(`OpenAI çeviri isteği başarısız (${yanit.status})${istekId ? ` [${istekId}]` : ""}: ${hataMetni.slice(0, 500)}`);
     }
     const veri = await yanit.json();
     return JSON.parse(yanitMetniniGetir(veri)).translations;
@@ -161,7 +162,9 @@ export async function ingilizceCeviriUret(varlikTuru, kaynak, onceki = null, { f
     }
     return { en, durum: "hazir", kaynakHash: hash, model: MODEL, guncelleme: new Date().toISOString() };
   } catch (hata) {
-    return { en: ayniKaynaginOncekiCevirisi, durum: "hata", kaynakHash: hash, hata: String(hata.message || hata).slice(0, 500), guncelleme: new Date().toISOString() };
+    const hataMesaji = String(hata.message || hata).slice(0, 700);
+    console.error(`AI ceviri hatasi (${varlikTuru}):`, hataMesaji);
+    return { en: ayniKaynaginOncekiCevirisi, durum: "hata", kaynakHash: hash, hata: hataMesaji, guncelleme: new Date().toISOString() };
   }
 }
 
