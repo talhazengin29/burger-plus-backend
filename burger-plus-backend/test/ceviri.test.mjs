@@ -14,9 +14,9 @@ test("çeviri kaynağını kararlı anahtarlarla düzleştirip geri kurar", () =
   assert.equal(hedef.malzemeler[1], "Hot sauce");
 });
 
-test("temporary OpenAI errors are retried for new content", async () => {
-  const oncekiAnahtar = process.env.OPENAI_API_KEY;
-  process.env.OPENAI_API_KEY = "test-key";
+test("temporary Gemini errors are retried for new content", async () => {
+  const oncekiAnahtar = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test-key";
   let deneme = 0;
   try {
     const sonuc = await ingilizceCeviriUret("urun", { ad: "Diyet Tost", aciklama: "Beyaz peynir ve domates" }, null, {
@@ -26,10 +26,10 @@ test("temporary OpenAI errors are retried for new content", async () => {
         if (deneme < 3) throw new Error("temporary network error");
         return {
           ok: true,
-          json: async () => ({ output_text: JSON.stringify({ translations: [
+          json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ translations: [
             { key: "ad", text: "Diet Toast" },
             { key: "aciklama", text: "White cheese and tomato" },
-          ] }) }),
+          ] }) }] } }] }),
         };
       },
     });
@@ -37,26 +37,26 @@ test("temporary OpenAI errors are retried for new content", async () => {
     assert.equal(sonuc.durum, "hazir");
     assert.equal(sonuc.en.aciklama, "White cheese and tomato");
   } finally {
-    if (oncekiAnahtar) process.env.OPENAI_API_KEY = oncekiAnahtar;
-    else delete process.env.OPENAI_API_KEY;
+    if (oncekiAnahtar) process.env.GEMINI_API_KEY = oncekiAnahtar;
+    else delete process.env.GEMINI_API_KEY;
   }
 });
 
 test("API anahtarı yoksa Türkçe kaydı engellemeden bekliyor durumuna geçer", async () => {
-  const oncekiAnahtar = process.env.OPENAI_API_KEY;
-  delete process.env.OPENAI_API_KEY;
+  const oncekiAnahtar = process.env.GEMINI_API_KEY;
+  delete process.env.GEMINI_API_KEY;
   try {
     const sonuc = await ingilizceCeviriUret("kategori", { ad: "Burgerler" });
     assert.equal(sonuc.durum, "bekliyor");
     assert.deepEqual(sonuc.en, {});
   } finally {
-    if (oncekiAnahtar) process.env.OPENAI_API_KEY = oncekiAnahtar;
+    if (oncekiAnahtar) process.env.GEMINI_API_KEY = oncekiAnahtar;
   }
 });
 
 test("Türkçe kaynak değiştiyse eski İngilizceyi göstermeyip güvenli fallback kullanır", async () => {
-  const oncekiAnahtar = process.env.OPENAI_API_KEY;
-  delete process.env.OPENAI_API_KEY;
+  const oncekiAnahtar = process.env.GEMINI_API_KEY;
+  delete process.env.GEMINI_API_KEY;
   try {
     const sonuc = await ingilizceCeviriUret("urun", { ad: "Yeni ürün" }, {
       en: { ad: "Old product" }, durum: "hazir", kaynakHash: "eski-hash",
@@ -64,23 +64,27 @@ test("Türkçe kaynak değiştiyse eski İngilizceyi göstermeyip güvenli fallb
     assert.equal(sonuc.durum, "bekliyor");
     assert.deepEqual(sonuc.en, {});
   } finally {
-    if (oncekiAnahtar) process.env.OPENAI_API_KEY = oncekiAnahtar;
+    if (oncekiAnahtar) process.env.GEMINI_API_KEY = oncekiAnahtar;
   }
 });
 
-test("OpenAI Structured Output yanıtını saklanabilir İngilizce nesnesine dönüştürür", async () => {
-  const oncekiAnahtar = process.env.OPENAI_API_KEY;
-  process.env.OPENAI_API_KEY = "test-key";
+test("Gemini structured output yanıtını saklanabilir İngilizce nesnesine dönüştürür", async () => {
+  const oncekiAnahtar = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test-key";
   let istekGovdesi;
-  const fetchImpl = async (_url, ayarlar) => {
+  let istekUrl;
+  let istekBasliklari;
+  const fetchImpl = async (url, ayarlar) => {
+    istekUrl = url;
+    istekBasliklari = ayarlar.headers;
     istekGovdesi = JSON.parse(ayarlar.body);
     return {
       ok: true,
       json: async () => ({
-        output: [{ content: [{ type: "output_text", text: JSON.stringify({ translations: [
+        candidates: [{ content: { parts: [{ text: JSON.stringify({ translations: [
           { key: "ad", text: "Spicy Burger" },
           { key: "malzemeler[0]", text: "Beef patty" },
-        ] }) }] }],
+        ] }) }] } }],
       }),
     };
   };
@@ -88,29 +92,31 @@ test("OpenAI Structured Output yanıtını saklanabilir İngilizce nesnesine dö
     const sonuc = await ingilizceCeviriUret("urun", { ad: "Acılı Burger", malzemeler: ["Dana köfte"] }, null, { fetchImpl });
     assert.equal(sonuc.durum, "hazir");
     assert.deepEqual(sonuc.en, { ad: "Spicy Burger", malzemeler: ["Beef patty"] });
-    assert.equal(istekGovdesi.store, false);
-    assert.equal(istekGovdesi.text.format.type, "json_schema");
+    assert.match(istekUrl, /gemini-3\.1-flash-lite:generateContent$/);
+    assert.equal(istekBasliklari["x-goog-api-key"], "test-key");
+    assert.equal(istekGovdesi.generationConfig.responseMimeType, "application/json");
+    assert.equal(istekGovdesi.generationConfig.responseJsonSchema.type, "object");
   } finally {
-    if (oncekiAnahtar) process.env.OPENAI_API_KEY = oncekiAnahtar;
-    else delete process.env.OPENAI_API_KEY;
+    if (oncekiAnahtar) process.env.GEMINI_API_KEY = oncekiAnahtar;
+    else delete process.env.GEMINI_API_KEY;
   }
 });
 
 test("aynı kaynak için hazır çeviriyi tekrar API'ye göndermez", async () => {
   const kaynak = { ad: "Patates" };
-  const oncekiAnahtar = process.env.OPENAI_API_KEY;
-  process.env.OPENAI_API_KEY = "test-key";
+  const oncekiAnahtar = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test-key";
   try {
     const ilk = await ingilizceCeviriUret("urun", kaynak, null, { fetchImpl: async () => ({
       ok: true,
-      json: async () => ({ output_text: JSON.stringify({ translations: [{ key: "ad", text: "Fries" }] }) }),
+      json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ translations: [{ key: "ad", text: "Fries" }] }) }] } }] }),
     }) });
     let cagrildi = false;
     const ikinci = await ingilizceCeviriUret("urun", kaynak, ilk, { fetchImpl: async () => { cagrildi = true; } });
     assert.equal(cagrildi, false);
     assert.deepEqual(ikinci, ilk);
   } finally {
-    if (oncekiAnahtar) process.env.OPENAI_API_KEY = oncekiAnahtar;
-    else delete process.env.OPENAI_API_KEY;
+    if (oncekiAnahtar) process.env.GEMINI_API_KEY = oncekiAnahtar;
+    else delete process.env.GEMINI_API_KEY;
   }
 });

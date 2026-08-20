@@ -1,8 +1,25 @@
 import { createHash } from "node:crypto";
 
-const OPENAI_URL = "https://api.openai.com/v1/responses";
-const MODEL = process.env.OPENAI_TRANSLATION_MODEL || "gpt-5-mini";
+const GEMINI_API_KOKU = "https://generativelanguage.googleapis.com/v1beta/models";
+const MODEL = process.env.GEMINI_TRANSLATION_MODEL || "gemini-3.1-flash-lite";
 const ZAMAN_ASIMI_MS = 20_000;
+
+const CEVIRI_YANIT_SEMASI = {
+  type: "object",
+  properties: {
+    translations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { key: { type: "string" }, text: { type: "string" } },
+        required: ["key", "text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["translations"],
+  additionalProperties: false,
+};
 
 function metinSiniri(varlikTuru, alan) {
   if (alan.includes("aciklama")) return varlikTuru === "urun" ? 2000 : 600;
@@ -47,65 +64,45 @@ function yolaYaz(hedef, yol, deger) {
 }
 
 function yanitMetniniGetir(yanit) {
-  if (typeof yanit.output_text === "string" && yanit.output_text) return yanit.output_text;
-  for (const oge of yanit.output || []) {
-    for (const icerik of oge.content || []) {
-      if (icerik.type === "output_text" && icerik.text) return icerik.text;
-    }
-  }
-  throw new Error("OpenAI boş çeviri yanıtı döndürdü.");
+  const metin = yanit?.candidates?.[0]?.content?.parts
+    ?.map((parca) => parca?.text || "")
+    .join("")
+    .trim();
+  if (metin) return metin;
+  throw new Error("Gemini boş çeviri yanıtı döndürdü.");
 }
 
-async function openAiIleCevir(varlikTuru, metinler, fetchImpl) {
+async function geminiIleCevir(varlikTuru, metinler, fetchImpl) {
   const denetleyici = new AbortController();
   const zamanlayici = setTimeout(() => denetleyici.abort(), ZAMAN_ASIMI_MS);
   try {
-    const yanit = await fetchImpl(OPENAI_URL, {
+    const talimat = [
+      "You translate Turkish restaurant and QR-menu content into natural, concise English.",
+      "Preserve brand names, trademarked product names, quantities, prices, emojis, placeholders and HTML-free formatting.",
+      "Use standard food-service terminology. Never add claims, ingredients or allergen information.",
+      "Return exactly one translation for every key and keep every key unchanged.",
+      JSON.stringify({ entity: varlikTuru, sourceLanguage: "tr", targetLanguage: "en", items: metinler }),
+    ].join("\n");
+    const yanit = await fetchImpl(`${GEMINI_API_KOKU}/${encodeURIComponent(MODEL)}:generateContent`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "x-goog-api-key": process.env.GEMINI_API_KEY,
         "Content-Type": "application/json",
       },
       signal: denetleyici.signal,
       body: JSON.stringify({
-        model: MODEL,
-        store: false,
-        instructions: [
-          "You translate Turkish restaurant and QR-menu content into natural, concise English.",
-          "Preserve brand names, product names that are trademarks, quantities, prices, emojis, placeholders and HTML-free formatting.",
-          "Use standard food-service terminology. Never add claims, ingredients or allergen information.",
-          "Return exactly one translation for every key and keep every key unchanged.",
-        ].join(" "),
-        input: JSON.stringify({ entity: varlikTuru, sourceLanguage: "tr", targetLanguage: "en", items: metinler }),
-        text: {
-          format: {
-            type: "json_schema",
-            name: "restaurant_translation",
-            strict: true,
-            schema: {
-              type: "object",
-              properties: {
-                translations: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: { key: { type: "string" }, text: { type: "string" } },
-                    required: ["key", "text"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["translations"],
-              additionalProperties: false,
-            },
-          },
+        contents: [{ role: "user", parts: [{ text: talimat }] }],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: "application/json",
+          responseJsonSchema: CEVIRI_YANIT_SEMASI,
         },
       }),
     });
     if (!yanit.ok) {
       const hataMetni = await yanit.text();
-      const istekId = yanit.headers?.get?.("x-request-id");
-      throw new Error(`OpenAI çeviri isteği başarısız (${yanit.status})${istekId ? ` [${istekId}]` : ""}: ${hataMetni.slice(0, 500)}`);
+      const istekId = yanit.headers?.get?.("x-request-id") || yanit.headers?.get?.("x-guploader-uploadid");
+      throw new Error(`Gemini çeviri isteği başarısız (${yanit.status})${istekId ? ` [${istekId}]` : ""}: ${hataMetni.slice(0, 500)}`);
     }
     const veri = await yanit.json();
     return JSON.parse(yanitMetniniGetir(veri)).translations;
@@ -116,17 +113,18 @@ async function openAiIleCevir(varlikTuru, metinler, fetchImpl) {
 
 export function ceviriYapilandirmasi() {
   return {
-    aktif: Boolean(process.env.OPENAI_API_KEY),
+    aktif: Boolean(process.env.GEMINI_API_KEY),
+    saglayici: "gemini",
     model: MODEL,
-    baslangictaTamamla: process.env.OPENAI_TRANSLATION_BACKFILL_ON_START === "true",
+    baslangictaTamamla: process.env.GEMINI_TRANSLATION_BACKFILL_ON_START === "true",
   };
 }
 
-async function openAiIleTekrarDeneyerekCevir(varlikTuru, metinler, fetchImpl, retryDelayMs) {
+async function geminiIleTekrarDeneyerekCevir(varlikTuru, metinler, fetchImpl, retryDelayMs) {
   let sonHata;
   for (let deneme = 0; deneme < 3; deneme += 1) {
     try {
-      return await openAiIleCevir(varlikTuru, metinler, fetchImpl);
+      return await geminiIleCevir(varlikTuru, metinler, fetchImpl);
     } catch (hata) {
       sonHata = hata;
       if (deneme < 2 && retryDelayMs > 0) {
@@ -144,12 +142,12 @@ export async function ingilizceCeviriUret(varlikTuru, kaynak, onceki = null, { f
 
   const metinler = metinleriDuzlestir(kaynak).slice(0, 300);
   if (!metinler.length) return { en: {}, durum: "hazir", kaynakHash: hash, guncelleme: new Date().toISOString() };
-  if (!process.env.OPENAI_API_KEY) {
-    return { en: ayniKaynaginOncekiCevirisi, durum: "bekliyor", kaynakHash: hash, hata: "OPENAI_API_KEY tanımlı değil.", guncelleme: new Date().toISOString() };
+  if (!process.env.GEMINI_API_KEY) {
+    return { en: ayniKaynaginOncekiCevirisi, durum: "bekliyor", kaynakHash: hash, hata: "GEMINI_API_KEY tanımlı değil.", guncelleme: new Date().toISOString() };
   }
 
   try {
-    const ceviriler = await openAiIleTekrarDeneyerekCevir(varlikTuru, metinler, fetchImpl, retryDelayMs);
+    const ceviriler = await geminiIleTekrarDeneyerekCevir(varlikTuru, metinler, fetchImpl, retryDelayMs);
     const beklenen = new Set(metinler.map(({ key }) => key));
     const gelen = new Map(ceviriler.map(({ key, text }) => [key, String(text || "").trim()]));
     if (gelen.size !== beklenen.size || [...beklenen].some((key) => !gelen.get(key))) {
@@ -160,7 +158,7 @@ export async function ingilizceCeviriUret(varlikTuru, kaynak, onceki = null, { f
       const sinir = metinSiniri(varlikTuru, key);
       yolaYaz(en, key, gelen.get(key).slice(0, sinir));
     }
-    return { en, durum: "hazir", kaynakHash: hash, model: MODEL, guncelleme: new Date().toISOString() };
+    return { en, durum: "hazir", kaynakHash: hash, saglayici: "gemini", model: MODEL, guncelleme: new Date().toISOString() };
   } catch (hata) {
     const hataMesaji = String(hata.message || hata).slice(0, 700);
     console.error(`AI ceviri hatasi (${varlikTuru}):`, hataMesaji);

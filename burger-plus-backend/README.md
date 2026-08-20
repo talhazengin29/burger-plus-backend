@@ -37,12 +37,12 @@ PORT=4000
 çeviri üretmek için yalnızca backend ortamına aşağıdaki değişkenleri ekle:
 
 ```env
-OPENAI_API_KEY=sk-...
-OPENAI_TRANSLATION_MODEL=gpt-5-mini
-OPENAI_TRANSLATION_BACKFILL_ON_START=true
+GEMINI_API_KEY=...
+GEMINI_TRANSLATION_MODEL=gemini-3.1-flash-lite
+GEMINI_TRANSLATION_BACKFILL_ON_START=true
 ```
 
-`OPENAI_TRANSLATION_BACKFILL_ON_START=true`, daha önce kaydedilmiş içerikleri bir
+`GEMINI_TRANSLATION_BACKFILL_ON_START=true`, daha önce kaydedilmiş içerikleri bir
 sonraki backend açılışında tarar. Çeviriler her müşteri isteğinde yeniden
 üretilmez; PostgreSQL içinde saklanır.
 Türkçe kaynak değişmediyse tekrar API çağrısı yapılmaz. Mevcut kayıtları veya

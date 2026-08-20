@@ -1178,7 +1178,7 @@ app.get("/api/admin/ceviri-durumu", admin, guvenli(async () => ceviriYapilandirm
 app.post("/api/admin/ceviriler/tamamla", admin, guvenli(async (req) => {
   const yapilandirma = ceviriYapilandirmasi();
   if (!yapilandirma.aktif) {
-    const hata = new Error("AI çevirisi için OPENAI_API_KEY tanımlanmalıdır.");
+    const hata = new Error("AI çevirisi için GEMINI_API_KEY tanımlanmalıdır.");
     hata.status = 503;
     throw hata;
   }
