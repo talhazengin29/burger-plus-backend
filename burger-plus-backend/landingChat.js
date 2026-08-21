@@ -5,7 +5,7 @@ const EN_FAZLA_MESAJ = 600;
 const EN_FAZLA_GECMIS = 6;
 
 const BILGI_TABANI = `
-Burger Plus, restoran ve kafeler icin web tabanli QR menu ve siparis platformudur.
+orQRestro, restoran ve kafeler icin web tabanli QR menu ve siparis platformudur.
 Musteri uygulama indirmeden masadaki QR kodu tarayarak menuyu acar ve siparis verebilir.
 Ozellikler: QR ile siparis, canli mutfak ve salon paneli, sadakat puani ve dijital damga karti,
 iyzico ile online odeme, satis raporlari, urun-kategori-kampanya yonetimi, logo ve renk ozellestirme.
@@ -55,7 +55,7 @@ const HAZIR_CEVAPLAR = [
   },
   {
     anahtarlar: ["merhaba", "selam", "hey", "iyi gunler", "iyi günler"],
-    cevap: "Merhaba! Burger Plus'ın fiyatları, özellikleri, kurulumu veya ücretsiz denemesi hakkında yardımcı olabilirim. Neyi merak ediyorsunuz?",
+    cevap: "Merhaba! orQRestro'nun fiyatları, özellikleri, kurulumu veya ücretsiz denemesi hakkında yardımcı olabilirim. Neyi merak ediyorsunuz?",
   },
 ];
 
@@ -113,7 +113,7 @@ async function geminiLandingCevabi(mesaj, gecmis, fetchImpl) {
       headers: { "x-goog-api-key": process.env.GEMINI_API_KEY, "Content-Type": "application/json" },
       signal: denetleyici.signal,
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: `Sen Burger Plus landing sayfasının Türkçe satış destek asistanısın. Yalnızca aşağıdaki doğrulanmış bilgilerle kısa, doğal ve en fazla 3 cümleyle cevap ver. Bilmediğin konuda tahmin yürütme; iletişim formuna yönlendir.\n\n${BILGI_TABANI}` }] },
+        systemInstruction: { parts: [{ text: `Sen orQRestro landing sayfasının Türkçe satış destek asistanısın. Yalnızca aşağıdaki doğrulanmış bilgilerle kısa, doğal ve en fazla 3 cümleyle cevap ver. Bilmediğin konuda tahmin yürütme; iletişim formuna yönlendir.\n\n${BILGI_TABANI}` }] },
         contents: [...gecmisiTemizle(gecmis), { role: "user", parts: [{ text: mesaj }] }],
         generationConfig: { temperature: 0.2, maxOutputTokens: 240, responseMimeType: "application/json", responseJsonSchema: YANIT_SEMASI },
       }),
