@@ -130,6 +130,7 @@ import {
 import { rezervasyonTablosunuHazirla, rezervasyonlariGetir, rezervasyonOlustur, rezervasyonGuncelle, rezervasyonSil } from "./rezervasyonDb.js";
 import { salonKrokisiniGetir, salonKrokisiniKaydet } from "./salonKrokiDb.js";
 import { degerlendirmeTablolariniHazirla, siparisDegerlendirmesiOlustur, adminDegerlendirmeRaporunuGetir } from "./degerlendirmeDb.js";
+import { landingChatYaniti } from "./landingChat.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -154,7 +155,7 @@ const izinliOriginler = new Set(
     .filter(Boolean)
 );
 if (!URETIM) {
-  ["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://127.0.0.1:5173", "http://127.0.0.1:5174", "http://127.0.0.1:5175"]
+  ["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://localhost:5176", "http://127.0.0.1:5173", "http://127.0.0.1:5174", "http://127.0.0.1:5175", "http://127.0.0.1:5176"]
     .forEach((origin) => izinliOriginler.add(origin));
 }
 function originIzinli(origin) {
@@ -229,6 +230,13 @@ const sikayetLimiti = rateLimit({
   windowMs: 15 * 60_000, limit: URETIM ? 60 : 180, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla geri bildirim isteği gönderildi. Lütfen kısa süre sonra tekrar deneyin." },
 });
+const landingChatLimiti = rateLimit({
+  windowMs: 5 * 60_000,
+  limit: URETIM ? 20 : 100,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { hata: "Sohbet sınırına ulaştınız. Lütfen birkaç dakika sonra tekrar deneyin." },
+});
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -271,6 +279,14 @@ app.get("/api/isletme/:slug", async (req, res) => {
 app.post("/api/giris-genel", kimlikLimiti, async (req, res) => {
   const sonuc = await girisYapGenel(req.body);
   if (sonuc.hata) return res.status(401).json(sonuc);
+  res.json(sonuc);
+});
+
+// Landing satış asistanı tenant seçimi gerektirmez. API anahtarı yalnızca
+// sunucuda kalır; hazır cevaplar AI kotasını tüketmeden doğrudan döner.
+app.post("/api/landing/chat", landingChatLimiti, async (req, res) => {
+  const sonuc = await landingChatYaniti(req.body || {});
+  if (sonuc.hata) return res.status(sonuc.durum || 400).json({ hata: sonuc.hata });
   res.json(sonuc);
 });
 
