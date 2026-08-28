@@ -81,6 +81,7 @@ import { ceviriYapilandirmasi } from "./ceviri.js";
 import {
   gorselYukle, logoYukle, storageDosyasiniSil,
   sikayetGorseliYukle, sikayetGorseliKullaniciyaAitMi,
+  giderBelgesiYukle, giderBelgesiIsletmeyeAitMi,
 } from "./storage.js";
 import { temaCoz } from "./konseptler.js";
 import {
@@ -130,6 +131,12 @@ import {
 import { rezervasyonTablosunuHazirla, rezervasyonlariGetir, rezervasyonOlustur, rezervasyonGuncelle, rezervasyonSil } from "./rezervasyonDb.js";
 import { salonKrokisiniGetir, salonKrokisiniKaydet } from "./salonKrokiDb.js";
 import { degerlendirmeTablolariniHazirla, siparisDegerlendirmesiOlustur, adminDegerlendirmeRaporunuGetir } from "./degerlendirmeDb.js";
+import {
+  giderTablolariniHazirla, finansMerkeziniGetir, giderKategorisiKaydet, giderKategorisiArsivle,
+  tedarikciKaydet, tedarikciArsivle, giderKaydet, giderDurumuGuncelle,
+  tedarikciOdemesiKaydet, duzenliGiderKaydet, duzenliGiderArsivle,
+  finansRaporunuGetir, giderButceleriniKaydet,
+} from "./giderDb.js";
 import { landingChatYaniti } from "./landingChat.js";
 
 const app = express();
@@ -1135,6 +1142,89 @@ app.post("/api/admin/gorseller", admin, express.raw({ type: "image/*", limit: "5
   const gorsel = await gorselYukle(req.body);
   return { gorsel };
 }));
+app.post(
+  "/api/admin/gider-belgesi",
+  admin,
+  express.raw({ type: ["image/png", "image/jpeg", "image/webp"], limit: "5mb" }),
+  guvenli(async (req) => ({ belgeUrl: await giderBelgesiYukle(req.body, req.isletme.id, req.headers["content-type"]) }))
+);
+app.get("/api/admin/finans", admin, guvenli(async (req) => finansMerkeziniGetir(req.isletme.id, pool, req.query || {})));
+app.get("/api/admin/finans/rapor", admin, guvenli(async (req) => finansRaporunuGetir(req.isletme.id, pool, req.query || {})));
+app.post("/api/admin/gider-butceleri", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const butce = await giderButceleriniKaydet(t, pool, req.kullanici?.id, req.body || {});
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "gider_butcesi", varlikId: butce.donem, islem: "guncelleme", aciklama: `${butce.donem.slice(0, 7)} gider bütçesi güncellendi.`, yeniDeger: butce });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "butce", donem: butce.donem });
+  return { butce };
+}));
+app.post("/api/admin/gider-kategorileri", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const kategori = await giderKategorisiKaydet(t, pool, req.body || {});
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "gider_kategorisi", varlikId: kategori.id, islem: req.body?.id ? "guncelleme" : "ekleme", aciklama: `${kategori.ad} gider kategorisi kaydedildi.`, yeniDeger: kategori });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "kategori", id: kategori.id });
+  return { kategori };
+}));
+app.delete("/api/admin/gider-kategorileri/:id", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  await giderKategorisiArsivle(t, pool, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "gider_kategorisi", varlikId: req.params.id, islem: "arsivleme", aciklama: "Gider kategorisi arşivlendi." });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "kategori", id: Number(req.params.id) });
+}));
+app.post("/api/admin/tedarikciler", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const tedarikci = await tedarikciKaydet(t, pool, req.body || {});
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "tedarikci", varlikId: tedarikci.id, islem: req.body?.id ? "guncelleme" : "ekleme", aciklama: `${tedarikci.ad} tedarikçisi kaydedildi.`, yeniDeger: tedarikci });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "tedarikci", id: tedarikci.id });
+  return { tedarikci };
+}));
+app.delete("/api/admin/tedarikciler/:id", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  await tedarikciArsivle(t, pool, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "tedarikci", varlikId: req.params.id, islem: "arsivleme", aciklama: "Tedarikçi arşivlendi." });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "tedarikci", id: Number(req.params.id) });
+}));
+app.post("/api/admin/giderler", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  if (!giderBelgesiIsletmeyeAitMi(req.body?.belgeUrl, t)) throw new Error("Gider belgesi bu işletmeye ait değil.");
+  const gider = await giderKaydet(t, pool, req.kullanici?.id, req.body || {});
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "gider", varlikId: gider.id, islem: req.body?.id ? "guncelleme" : "ekleme", aciklama: `${gider.baslik} gideri onaya gönderildi.`, yeniDeger: gider });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "gider", id: gider.id });
+  return { gider };
+}));
+app.patch("/api/admin/giderler/:id/durum", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const gider = await giderDurumuGuncelle(t, pool, req.kullanici?.id, req.params.id, req.body?.durum, req.body?.neden);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "gider", varlikId: gider.id, islem: gider.durum, aciklama: `${gider.baslik} gideri ${gider.durum}.`, yeniDeger: gider });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "gider", id: gider.id, durum: gider.durum });
+  return { gider };
+}));
+app.delete("/api/admin/giderler/:id", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const gider = await giderDurumuGuncelle(t, pool, req.kullanici?.id, req.params.id, "iptal", req.body?.neden);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "gider", varlikId: gider.id, islem: "iptal", aciklama: `${gider.baslik} gideri ters kayıtla iptal edildi.`, yeniDeger: gider });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "gider", id: gider.id, durum: "iptal" });
+  return { gider };
+}));
+app.post("/api/admin/duzenli-giderler", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const id = await duzenliGiderKaydet(t, pool, req.kullanici?.id, req.body || {});
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "duzenli_gider", varlikId: id, islem: req.body?.id ? "guncelleme" : "ekleme", aciklama: `${req.body?.baslik || "Düzenli gider"} planı kaydedildi.` });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "duzenli_gider", id });
+  return { id };
+}));
+app.delete("/api/admin/duzenli-giderler/:id", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  await duzenliGiderArsivle(t, pool, req.params.id);
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "duzenli_gider", varlikId: req.params.id, islem: "arsivleme", aciklama: "Düzenli gider planı durduruldu." });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "duzenli_gider", id: Number(req.params.id) });
+}));
+app.post("/api/admin/tedarikciler/:id/odemeler", admin, guvenli(async (req) => {
+  const t = req.isletme.id;
+  const odeme = await tedarikciOdemesiKaydet(t, pool, req.kullanici?.id, req.params.id, req.body || {});
+  await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "tedarikci_odeme", varlikId: odeme.id, islem: "ekleme", aciklama: `Tedarikçiye ${odeme.tutar} TL ödeme kaydedildi.`, yeniDeger: odeme });
+  io.to(oda(t, "yonetim")).emit("finans-guncellendi", { tur: "tedarikci_odeme", id: odeme.id });
+  return { odeme };
+}));
 app.get("/api/admin/kategoriler", admin, guvenli(async (req) => ({ kategoriler: await kategorileriGetir(req.isletme.id, { tumu: true }) })));
 app.post("/api/admin/kategoriler", admin, guvenli(async (req) => {
   const t = req.isletme.id;
@@ -1557,6 +1647,7 @@ isletmeTablosunuHazirla()
   .then(() => sikayetTablosunuHazirla(pool))
   .then(() => rezervasyonTablosunuHazirla(pool))
   .then(() => degerlendirmeTablolariniHazirla(pool))
+  .then(() => giderTablolariniHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
   .then(() => ilkSuperAdminiHazirla())

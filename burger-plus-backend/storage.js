@@ -125,6 +125,25 @@ export function sikayetGorseliKullaniciyaAitMi(publicUrl, isletmeId, kullaniciId
   return url.startsWith(onEk) && !url.includes("..") && url.length <= 1000;
 }
 
+export async function giderBelgesiYukle(buffer, isletmeId, bildirilenMime) {
+  if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir gider belgesi gönderilmelidir.");
+  const izinliTurler = GORSEL_TURLERI.filter((tur) => ["image/png", "image/jpeg", "image/webp"].includes(tur.mime));
+  const gorselTuru = dosyaTurunuBul(buffer, izinliTurler, bildirilenMime);
+  if (!gorselTuru) throw new Error("Gider belgesi PNG, JPG/JPEG veya WebP formatında olmalıdır.");
+  const tenant = Number(isletmeId);
+  if (!Number.isSafeInteger(tenant) || tenant < 1) throw new Error("Belge işletmesi doğrulanamadı.");
+  const nesneYolu = `giderler/${tenant}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${gorselTuru.uzanti}`;
+  return nesneYukle(buffer, nesneYolu, gorselTuru, 5 * 1024 * 1024, "Gider belgesi en fazla 5 MB olabilir.");
+}
+
+export function giderBelgesiIsletmeyeAitMi(publicUrl, isletmeId) {
+  const url = String(publicUrl || "").trim();
+  if (!url) return true;
+  const ayarlar = ayarlariGetir();
+  const onEk = `${ayarlar.supabaseUrl}/storage/v1/object/public/${ayarlar.bucket}/giderler/${Number(isletmeId)}/`;
+  return url.startsWith(onEk) && !url.includes("..") && url.length <= 1000;
+}
+
 // Farklı oranlarda ve çevresinde görünmez/beyaz boşluk bulunan logoların
 // uygulamanın her yerinde aynı dolulukta görünmesi için ortak bir tuval üretir.
 // Çıktı 2.7:1 oranındadır; üst bar (112x45), giriş ve açılış ekranları bu
