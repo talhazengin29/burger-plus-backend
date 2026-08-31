@@ -12,6 +12,7 @@ import { randomBytes, randomUUID } from "crypto";
 import { odemeSadakatiniUygula } from "./sadakatDb.js";
 import {
   siparisReceteStogunuIsle,
+  siparisUrunAdetleriniTopla,
   suresiDolanHammaddeRezervasyonlariniBirak,
 } from "./receteDb.js";
 
@@ -658,20 +659,6 @@ async function odemeUrunleriniDogrula(isletmeId, hamUrunler, kullaniciId = null)
   });
 }
 
-function urunAdetleriniTopla(urunler) {
-  const adetler = new Map();
-  for (const urun of urunler || []) {
-    const urunId = Number(urun?.id);
-    const adet = Math.max(1, Math.floor(Number(urun?.adet || 1)));
-    if (Number.isInteger(urunId)) adetler.set(urunId, (adetler.get(urunId) || 0) + adet);
-    for (const bagliId of [urun?.secimler?.menuBurgerId, urun?.secimler?.yanLezzetId, urun?.secimler?.icecekId]) {
-      const id = Number(bagliId);
-      if (Number.isInteger(id)) adetler.set(id, (adetler.get(id) || 0) + adet);
-    }
-  }
-  return adetler;
-}
-
 async function suresiDolanStoklariBirak(baglanti, tenantId) {
   await baglanti.query(`
     WITH birakilan AS (
@@ -689,7 +676,7 @@ async function suresiDolanStoklariBirak(baglanti, tenantId) {
 }
 
 async function siparisStogunuIsle(baglanti, tenantId, odemeId, urunler, { rezervasyon = false, stokAciginaIzinVer = false } = {}) {
-  const adetler = urunAdetleriniTopla(urunler);
+  const adetler = siparisUrunAdetleriniTopla(urunler);
   if (!adetler.size) return;
   const idler = [...adetler.keys()];
   const urunSonucu = await baglanti.query(

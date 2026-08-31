@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { hammaddeVerisiniDogrula, receteSatirlariniDogrula, receteMaliyetiHesapla } from "../receteDb.js";
+import { hammaddeVerisiniDogrula, receteSatirlariniDogrula, receteMaliyetiHesapla, siparisUrunAdetleriniTopla } from "../receteDb.js";
 
 test("hammadde adı, birimi ve kritik stok eşiği doğrulanır", () => {
   assert.deepEqual(hammaddeVerisiniDogrula({ ad: "  Kaşar Peyniri ", birim: "GR", minimumStok: "2500" }), {
@@ -26,4 +26,20 @@ test("reçete maliyeti miktar, fire ve ortalama birim maliyetten hesaplanır", (
     { miktar: 2, fireOrani: 0, birimMaliyet: 4.5 },
   ]);
   assert.equal(maliyet, 40.5);
+});
+
+test("tek ürün reçetesi sipariş adedi kadar tüketilir", () => {
+  assert.deepEqual([...siparisUrunAdetleriniTopla([{ id: 10, adet: 1 }])], [[10, 1]]);
+  assert.deepEqual([...siparisUrunAdetleriniTopla([{ id: 10, adet: 3 }])], [[10, 3]]);
+});
+
+test("menü sanal ürünü sayılmaz, yalnızca tekil bileşenleri tüketilir", () => {
+  const sonuc = siparisUrunAdetleriniTopla([{ id: 99, adet: 1, secimler: {
+    menuBurgerId: 10, yanLezzetId: 20, icecekId: 30,
+  } }]);
+  assert.deepEqual([...sonuc], [[10, 1], [20, 1], [30, 1]]);
+  assert.equal(sonuc.has(99), false);
+  assert.deepEqual([...siparisUrunAdetleriniTopla([{ id: 99, adet: 1, secimler: {
+    menuBurgerId: 10, yanLezzetId: 10, icecekId: 30,
+  } }])], [[10, 1], [30, 1]]);
 });

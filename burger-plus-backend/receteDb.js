@@ -333,12 +333,16 @@ export async function receteStokMerkeziniGetir(isletmeId, pool) {
   };
 }
 
-function urunAdetleriniTopla(urunler) {
+export function siparisUrunAdetleriniTopla(urunler) {
   const adetler = new Map();
   for (const urun of urunler || []) {
     const adet = Math.max(1, Math.floor(Number(urun?.adet || 1)));
-    for (const hamId of [urun?.id, urun?.secimler?.menuBurgerId, urun?.secimler?.yanLezzetId, urun?.secimler?.icecekId]) {
-      const id = Number(hamId);
+    const menuIdleri = [urun?.secimler?.menuBurgerId, urun?.secimler?.yanLezzetId, urun?.secimler?.icecekId]
+      .map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+    // Menü sanal bir paket ürünüdür. Reçete ve stok yalnızca içindeki gerçek
+    // ürünlerden düşülür; aksi halde menü ve bileşenleri birlikte iki kez sayılır.
+    const urunIdleri = menuIdleri.length ? new Set(menuIdleri) : new Set([Number(urun?.id)]);
+    for (const id of urunIdleri) {
       if (Number.isSafeInteger(id) && id > 0) adetler.set(id, (adetler.get(id) || 0) + adet);
     }
   }
@@ -359,7 +363,7 @@ export async function suresiDolanHammaddeRezervasyonlariniBirak(baglanti, isletm
 
 export async function siparisReceteStogunuIsle(baglanti, isletmeId, odemeId, urunler, { rezervasyon = false, stokAciginaIzinVer = false } = {}) {
   const id = tenantId(isletmeId);
-  const adetler = urunAdetleriniTopla(urunler);
+  const adetler = siparisUrunAdetleriniTopla(urunler);
   if (!adetler.size) return;
   const receteSonucu = await baglanti.query(
     `SELECT r.urun_id,r.hammadde_id,r.miktar,r.fire_orani,h.ad,h.stok_miktari,h.ortalama_birim_maliyet
