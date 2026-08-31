@@ -1131,7 +1131,9 @@ app.post("/api/admin/hammaddeler/:id/stok-hareketi", admin, guvenli(async (req) 
   return sonuc;
 }));
 app.put("/api/admin/urunler/:id/recete", admin, guvenli(async (req) => {
-  await urunRecetesiKaydet(req.isletme.id, pool, req.params.id, req.body?.satirlar || []);
+  await urunRecetesiKaydet(req.isletme.id, pool, req.params.id, req.body?.satirlar || [], {
+    malzemeleriOtomatikGuncelle: req.body?.malzemeleriOtomatikGuncelle !== false,
+  });
   io.to(oda(req.isletme.id, "yonetim")).emit("recete-stok-guncellendi");
   return { basarili: true };
 }));

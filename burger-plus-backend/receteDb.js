@@ -24,6 +24,8 @@ function negatifOlmayanSayi(deger, alan, ustSinir = 1_000_000_000) {
 export function hammaddeVerisiniDogrula(veri = {}) {
   const ad = String(veri.ad || "").trim().replace(/\s+/g, " ").slice(0, 120);
   const birim = String(veri.birim || "").trim().toLowerCase();
+  const musteriyeGoster = veri.musteriyeGoster === true;
+  const musteriAdi = String(veri.musteriAdi || "").trim().replace(/\s+/g, " ").slice(0, 120);
   if (ad.length < 2) throw new Error("Hammadde adı en az 2 karakter olmalıdır.");
   if (!BIRIMLER.has(birim)) throw new Error("Hammadde birimi gr, ml veya adet olmalıdır.");
   return {
@@ -31,6 +33,8 @@ export function hammaddeVerisiniDogrula(veri = {}) {
     ad,
     birim,
     minimumStok: negatifOlmayanSayi(veri.minimumStok, "Minimum stok"),
+    musteriyeGoster,
+    musteriAdi: musteriyeGoster ? (musteriAdi || ad) : "",
     aktif: veri.aktif !== false,
   };
 }
@@ -69,6 +73,8 @@ export async function receteTablolariniHazirla(pool) {
       stok_miktari NUMERIC(16,4) NOT NULL DEFAULT 0,
       minimum_stok NUMERIC(16,4) NOT NULL DEFAULT 0 CHECK (minimum_stok >= 0),
       ortalama_birim_maliyet NUMERIC(16,6) NOT NULL DEFAULT 0 CHECK (ortalama_birim_maliyet >= 0),
+      musteriye_goster BOOLEAN NOT NULL DEFAULT false,
+      musteri_adi TEXT NOT NULL DEFAULT '',
       aktif BOOLEAN NOT NULL DEFAULT true,
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -125,6 +131,9 @@ export async function receteTablolariniHazirla(pool) {
       ON recete_stok_rezervasyonlari (isletme_id, durum, son_gecerlilik);
     ALTER TABLE recete_stok_rezervasyonlari
       ADD COLUMN IF NOT EXISTS birim_maliyet NUMERIC(16,6) NOT NULL DEFAULT 0;
+    ALTER TABLE recete_hammaddeler ADD COLUMN IF NOT EXISTS musteriye_goster BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE recete_hammaddeler ADD COLUMN IF NOT EXISTS musteri_adi TEXT NOT NULL DEFAULT '';
+    ALTER TABLE urunler ADD COLUMN IF NOT EXISTS malzemeler_receteden BOOLEAN NOT NULL DEFAULT false;
   `);
 }
 
@@ -141,6 +150,7 @@ function hammaddeDonustur(satir) {
     id: Number(satir.id), ad: satir.ad, birim: satir.birim,
     stokMiktari: kullanilabilir, rezerveMiktar: rezerve, fizikselStok: kullanilabilir + rezerve,
     minimumStok: Number(satir.minimum_stok || 0), birimMaliyet: Number(satir.ortalama_birim_maliyet || 0),
+    musteriyeGoster: satir.musteriye_goster === true, musteriAdi: satir.musteri_adi || "",
     stokDegeri: Number((Math.max(0, kullanilabilir + rezerve) * Number(satir.ortalama_birim_maliyet || 0)).toFixed(2)),
     kritik: satir.aktif === true && kullanilabilir <= Number(satir.minimum_stok || 0), aktif: satir.aktif === true,
   };
@@ -169,14 +179,14 @@ export async function hammaddeKaydet(isletmeId, pool, veri) {
         throw new Error("Bu hammadde aktif ürün reçetelerinde kullanılıyor. Önce reçetelerden kaldırın.");
       }
       sonuc = await pool.query(
-        `UPDATE recete_hammaddeler SET ad=$3,birim=$4,minimum_stok=$5,aktif=$6,guncelleme=NOW()
+        `UPDATE recete_hammaddeler SET ad=$3,birim=$4,minimum_stok=$5,aktif=$6,musteriye_goster=$7,musteri_adi=$8,guncelleme=NOW()
          WHERE isletme_id=$1 AND id=$2 RETURNING *`,
-        [id, hammadde.id, hammadde.ad, hammadde.birim, hammadde.minimumStok, hammadde.aktif]
+        [id, hammadde.id, hammadde.ad, hammadde.birim, hammadde.minimumStok, hammadde.aktif, hammadde.musteriyeGoster, hammadde.musteriAdi]
       );
     } else {
       sonuc = await pool.query(
-        `INSERT INTO recete_hammaddeler(isletme_id,ad,birim,minimum_stok,aktif) VALUES($1,$2,$3,$4,$5) RETURNING *`,
-        [id, hammadde.ad, hammadde.birim, hammadde.minimumStok, hammadde.aktif]
+        `INSERT INTO recete_hammaddeler(isletme_id,ad,birim,minimum_stok,aktif,musteriye_goster,musteri_adi) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [id, hammadde.ad, hammadde.birim, hammadde.minimumStok, hammadde.aktif, hammadde.musteriyeGoster, hammadde.musteriAdi]
       );
     }
   } catch (hata) {
@@ -184,7 +194,24 @@ export async function hammaddeKaydet(isletmeId, pool, veri) {
     throw hata;
   }
   if (!sonuc.rows[0]) throw new Error("Hammadde bulunamadı.");
+  if (hammadde.id) await urunMalzemeleriniRecetedenGuncelle(id, pool);
   return hammaddeDonustur({ ...sonuc.rows[0], rezerve_miktar: 0 });
+}
+
+export async function urunMalzemeleriniRecetedenGuncelle(isletmeId, sorguYurutucu, urunId = null) {
+  const id = tenantId(isletmeId);
+  const urun = urunId == null ? null : Number(urunId);
+  await sorguYurutucu.query(`
+    UPDATE urunler u SET malzemeler=COALESCE((
+      SELECT jsonb_agg(gorunen.ad ORDER BY gorunen.ad)
+      FROM (
+        SELECT DISTINCT COALESCE(NULLIF(h.musteri_adi,''),h.ad) ad
+        FROM recete_urun_satirlari r
+        JOIN recete_hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id
+        WHERE r.isletme_id=u.isletme_id AND r.urun_id=u.id AND h.musteriye_goster=true
+      ) gorunen
+    ),'[]'::jsonb),guncelleme=NOW()
+    WHERE u.isletme_id=$1 AND u.malzemeler_receteden=true AND ($2::int IS NULL OR u.id=$2)`, [id, urun]);
 }
 
 export async function hammaddeStokHareketiKaydet(isletmeId, pool, hammaddeId, veri, personelId) {
@@ -240,7 +267,7 @@ export async function hammaddeStokHareketiKaydet(isletmeId, pool, hammaddeId, ve
   }
 }
 
-export async function urunRecetesiKaydet(isletmeId, pool, urunId, gelenSatirlar) {
+export async function urunRecetesiKaydet(isletmeId, pool, urunId, gelenSatirlar, { malzemeleriOtomatikGuncelle = true } = {}) {
   const id = tenantId(isletmeId);
   const urun = Number(urunId);
   if (!Number.isSafeInteger(urun) || urun < 1) throw new Error("Ürün geçersiz.");
@@ -261,6 +288,8 @@ export async function urunRecetesiKaydet(isletmeId, pool, urunId, gelenSatirlar)
         [id, urun, satir.hammaddeId, satir.miktar, satir.fireOrani]
       );
     }
+    await baglanti.query("UPDATE urunler SET malzemeler_receteden=$3,guncelleme=NOW() WHERE isletme_id=$1 AND id=$2", [id, urun, malzemeleriOtomatikGuncelle === true]);
+    if (malzemeleriOtomatikGuncelle === true) await urunMalzemeleriniRecetedenGuncelle(id, baglanti, urun);
     await baglanti.query("COMMIT");
   } catch (hata) {
     await baglanti.query("ROLLBACK").catch(() => {});
@@ -275,7 +304,7 @@ export async function receteStokMerkeziniGetir(isletmeId, pool) {
   const [hammaddeler, receteSonucu, hareketSonucu] = await Promise.all([
     hammaddeleriGetir(id, pool),
     pool.query(`
-      SELECT u.id urun_id,u.ad urun_adi,u.fiyat,
+      SELECT u.id urun_id,u.ad urun_adi,u.fiyat,u.malzemeler_receteden,
         COALESCE(json_agg(json_build_object(
           'hammaddeId',h.id,'hammaddeAdi',h.ad,'birim',h.birim,'miktar',r.miktar,
           'fireOrani',r.fire_orani,'birimMaliyet',h.ortalama_birim_maliyet
@@ -284,7 +313,7 @@ export async function receteStokMerkeziniGetir(isletmeId, pool) {
       LEFT JOIN recete_urun_satirlari r ON r.isletme_id=u.isletme_id AND r.urun_id=u.id
       LEFT JOIN recete_hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id
       WHERE u.isletme_id=$1 AND u.arsivli=false
-      GROUP BY u.id,u.ad,u.fiyat ORDER BY u.ad`, [id]),
+      GROUP BY u.id,u.ad,u.fiyat,u.malzemeler_receteden ORDER BY u.ad`, [id]),
     pool.query(`SELECT s.id,s.hammadde_id,h.ad hammadde_adi,h.birim,s.tur,s.miktar,s.toplam_maliyet,s.onceki_stok,s.sonraki_stok,s.aciklama,s.olusturma
       FROM recete_stok_hareketleri s JOIN recete_hammaddeler h ON h.id=s.hammadde_id AND h.isletme_id=s.isletme_id
       WHERE s.isletme_id=$1 ORDER BY s.olusturma DESC LIMIT 50`, [id]),
@@ -295,7 +324,7 @@ export async function receteStokMerkeziniGetir(isletmeId, pool) {
     }));
     const maliyet = receteMaliyetiHesapla(satirlar);
     const fiyat = Number(satir.fiyat || 0);
-    return { urunId: Number(satir.urun_id), urunAdi: satir.urun_adi, fiyat, satirlar, maliyet, brutKar: Number((fiyat - maliyet).toFixed(2)), maliyetOrani: fiyat > 0 ? Number((maliyet / fiyat * 100).toFixed(1)) : 0 };
+    return { urunId: Number(satir.urun_id), urunAdi: satir.urun_adi, fiyat, malzemeleriOtomatikGuncelle: satir.malzemeler_receteden === true, satirlar, maliyet, brutKar: Number((fiyat - maliyet).toFixed(2)), maliyetOrani: fiyat > 0 ? Number((maliyet / fiyat * 100).toFixed(1)) : 0 };
   });
   return {
     hammaddeler,

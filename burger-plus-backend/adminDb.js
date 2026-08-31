@@ -1,6 +1,7 @@
 import pool, { davetKoduUret } from "./db.js";
 import bcrypt from "bcryptjs";
 import { ingilizceCeviriUret } from "./ceviri.js";
+import { urunMalzemeleriniRecetedenGuncelle } from "./receteDb.js";
 
 function isletmeIdZorunlu(isletmeId) {
   const id = Number(isletmeId);
@@ -395,6 +396,7 @@ export async function adminTablolariHazirla(isletmeId) {
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS stok_adedi INTEGER NOT NULL DEFAULT 0");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb");
+  await pool.query("ALTER TABLE urunler ADD COLUMN IF NOT EXISTS malzemeler_receteden BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE kategoriler ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE kategoriler ADD COLUMN IF NOT EXISTS ceviriler JSONB NOT NULL DEFAULT '{}'::jsonb");
   await pool.query("ALTER TABLE personeller ADD COLUMN IF NOT EXISTS arsivli BOOLEAN NOT NULL DEFAULT false");
@@ -574,6 +576,7 @@ function urunDonustur(u, { stokDetayi = false } = {}) {
     gorsel: u.gorsel,
     aciklama: u.aciklama,
     malzemeler: u.malzemeler || [],
+    malzemelerReceteden: u.malzemeler_receteden === true,
     alerjenler: u.alerjenler || [],
     besinDegerleri: u.besin_degerleri || null,
     temelMiktar: u.temel_miktar == null ? null : Number(u.temel_miktar),
@@ -763,6 +766,7 @@ export async function urunKaydet(isletmeId, veri) {
     ekstraMalzemeAyari,
   }), oncekiCeviri);
   alanlar.push(JSON.stringify(ceviriler));
+  alanlar.push(veri.malzemelerReceteden === true);
   const mevcutKategori = await pool.query(
     "SELECT ceviriler FROM kategoriler WHERE isletme_id=$1 AND ad=$2 AND arsivli=false LIMIT 1",
     [tenantId, alanlar[2]]
@@ -780,17 +784,24 @@ export async function urunKaydet(isletmeId, veri) {
           malzemeler=$6::jsonb, alerjenler=$7::jsonb, temel_miktar=$8,
           gramaj_opsiyonu=$9::jsonb, urun_tipi=$10, boyut_secenekleri=$11::jsonb,
           ekstra_malzeme_ayari=$12::jsonb, menu_yapisi=$13::jsonb, onerilen_urunler=$14::jsonb, aktif=$15, populer=$16,
-          stok_takibi=$17, stok_adedi=$18, sira=$19, ceviriler=$20::jsonb, arsivli=false, guncelleme=NOW()
-         WHERE isletme_id=$21 AND id=$22 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
+          stok_takibi=$17, stok_adedi=$18, sira=$19, ceviriler=$20::jsonb, malzemeler_receteden=$21,
+          arsivli=false, guncelleme=NOW()
+         WHERE isletme_id=$22 AND id=$23 AND arsivli=false RETURNING *`, [...alanlar, tenantId, veri.id]
       )
     : await pool.query(
         `INSERT INTO urunler
           (isletme_id,ad,fiyat,kategori,gorsel,aciklama,malzemeler,alerjenler,temel_miktar,gramaj_opsiyonu,
-           urun_tipi,boyut_secenekleri,ekstra_malzeme_ayari,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,sira,ceviriler,arsivli)
-         VALUES ($21,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20::jsonb,false) RETURNING *`, [...alanlar, tenantId]
+           urun_tipi,boyut_secenekleri,ekstra_malzeme_ayari,menu_yapisi,onerilen_urunler,aktif,populer,stok_takibi,stok_adedi,sira,ceviriler,malzemeler_receteden,arsivli)
+         VALUES ($22,$1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20::jsonb,$21,false) RETURNING *`, [...alanlar, tenantId]
       );
   if (!sonuc.rows.length) throw new Error("Ürün bulunamadı veya arşivlenmiş.");
-  return urunDonustur(sonuc.rows[0], { stokDetayi: true });
+  let kaydedilenUrun = sonuc.rows[0];
+  if (kaydedilenUrun.malzemeler_receteden === true) {
+    await urunMalzemeleriniRecetedenGuncelle(tenantId, pool, kaydedilenUrun.id);
+    const guncel = await pool.query("SELECT * FROM urunler WHERE isletme_id=$1 AND id=$2 AND arsivli=false", [tenantId, kaydedilenUrun.id]);
+    kaydedilenUrun = guncel.rows[0] || kaydedilenUrun;
+  }
+  return urunDonustur(kaydedilenUrun, { stokDetayi: true });
 }
 
 async function onerilenUrunleriDogrula(isletmeId, ham, kendiId) {

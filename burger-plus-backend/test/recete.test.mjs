@@ -4,8 +4,12 @@ import { hammaddeVerisiniDogrula, receteSatirlariniDogrula, receteMaliyetiHesapl
 
 test("hammadde adı, birimi ve kritik stok eşiği doğrulanır", () => {
   assert.deepEqual(hammaddeVerisiniDogrula({ ad: "  Kaşar Peyniri ", birim: "GR", minimumStok: "2500" }), {
-    id: null, ad: "Kaşar Peyniri", birim: "gr", minimumStok: 2500, aktif: true,
+    id: null, ad: "Kaşar Peyniri", birim: "gr", minimumStok: 2500, musteriyeGoster: false, musteriAdi: "", aktif: true,
   });
+  assert.deepEqual(hammaddeVerisiniDogrula({ ad: "Dana eti 120 gr", birim: "gr", musteriyeGoster: true, musteriAdi: "Dana köfte" }), {
+    id: null, ad: "Dana eti 120 gr", birim: "gr", minimumStok: 0, musteriyeGoster: true, musteriAdi: "Dana köfte", aktif: true,
+  });
+  assert.equal(hammaddeVerisiniDogrula({ ad: "Domates", birim: "adet", musteriyeGoster: true }).musteriAdi, "Domates");
   assert.throws(() => hammaddeVerisiniDogrula({ ad: "X", birim: "kg" }), /adı/);
 });
 
