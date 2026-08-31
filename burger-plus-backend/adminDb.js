@@ -596,24 +596,47 @@ function urunDonustur(u, { stokDetayi = false } = {}) {
 
 export async function urunleriGetir(isletmeId, { tumu = false, stokDetayi = false } = {}) {
   const tenantId = isletmeIdZorunlu(isletmeId);
-  const sonuc = await pool.query(`
-    SELECT u.*
-    FROM urunler u
-    LEFT JOIN kategoriler k ON k.isletme_id=u.isletme_id AND k.ad=u.kategori AND k.arsivli=false
-    WHERE u.isletme_id=$1 AND u.arsivli=false ${tumu ? "" : "AND u.aktif=true"}
-    ORDER BY COALESCE(k.sira,999), u.sira, u.ad
-  `, [tenantId]);
+  const [sonuc, receteSonucu] = await Promise.all([
+    pool.query(`
+      SELECT u.*
+      FROM urunler u
+      LEFT JOIN kategoriler k ON k.isletme_id=u.isletme_id AND k.ad=u.kategori AND k.arsivli=false
+      WHERE u.isletme_id=$1 AND u.arsivli=false ${tumu ? "" : "AND u.aktif=true"}
+      ORDER BY COALESCE(k.sira,999), u.sira, u.ad
+    `, [tenantId]),
+    pool.query(`
+      SELECT r.urun_id,
+        GREATEST(0,MIN(FLOOR(h.stok_miktari/(r.miktar*(1+r.fire_orani/100)))))::int uretilebilir_adet,
+        SUM(r.miktar*(1+r.fire_orani/100)*h.ortalama_birim_maliyet) recete_maliyeti
+      FROM urun_receteleri r
+      JOIN hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id AND h.aktif=true
+      WHERE r.isletme_id=$1 GROUP BY r.urun_id
+    `, [tenantId]),
+  ]);
   const stoklar = new Map(sonuc.rows.map((urun) => [Number(urun.id), {
     takip: urun.stok_takibi === true,
     adet: Number(urun.stok_adedi || 0),
   }]));
+  const receteStoklari = new Map(receteSonucu.rows.map((satir) => [Number(satir.urun_id), {
+    uretilebilirAdet: Number(satir.uretilebilir_adet || 0),
+    maliyet: Number(satir.recete_maliyeti || 0),
+  }]));
   return sonuc.rows.map((satir) => {
     const urun = urunDonustur(satir, { stokDetayi });
+    const receteStogu = receteStoklari.get(Number(urun.id));
+    if (receteStogu) {
+      if (receteStogu.uretilebilirAdet < 1) urun.stokta = false;
+      if (stokDetayi) {
+        urun.receteMaliyeti = Number(receteStogu.maliyet.toFixed(2));
+        urun.receteUretilebilirAdet = receteStogu.uretilebilirAdet;
+      }
+    }
     if (urun.urunTipi === "menu") {
       const menu = urun.menuYapisi || {};
-      const bagliStoklar = [menu.burgerUrunId, menu.yanLezzetUrunId, menu.icecekUrunId]
-        .map(Number).map((id) => stoklar.get(id)).filter(Boolean);
-      if (bagliStoklar.some((stok) => stok.takip && stok.adet < 1)) urun.stokta = false;
+      const bagliIdler = [menu.burgerUrunId, menu.yanLezzetUrunId, menu.icecekUrunId].map(Number).filter(Number.isInteger);
+      const bagliStoklar = bagliIdler.map((id) => stoklar.get(id)).filter(Boolean);
+      const bagliReceteler = bagliIdler.map((id) => receteStoklari.get(id)).filter(Boolean);
+      if (bagliStoklar.some((stok) => stok.takip && stok.adet < 1) || bagliReceteler.some((recete) => recete.uretilebilirAdet < 1)) urun.stokta = false;
     }
     return urun;
   });

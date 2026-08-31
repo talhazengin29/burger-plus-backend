@@ -10,6 +10,10 @@ import pkg from "pg";
 import dotenv from "dotenv";
 import { randomBytes, randomUUID } from "crypto";
 import { odemeSadakatiniUygula } from "./sadakatDb.js";
+import {
+  siparisReceteStogunuIsle,
+  suresiDolanHammaddeRezervasyonlariniBirak,
+} from "./receteDb.js";
 
 dotenv.config();
 const { Pool } = pkg;
@@ -681,6 +685,7 @@ async function suresiDolanStoklariBirak(baglanti, tenantId) {
     UPDATE urunler u SET stok_adedi=u.stok_adedi+toplam.adet, guncelleme=NOW()
     FROM toplam WHERE u.isletme_id=$1 AND u.id=toplam.urun_id
   `, [tenantId]);
+  await suresiDolanHammaddeRezervasyonlariniBirak(baglanti, tenantId);
 }
 
 async function siparisStogunuIsle(baglanti, tenantId, odemeId, urunler, { rezervasyon = false, stokAciginaIzinVer = false } = {}) {
@@ -724,6 +729,7 @@ async function siparisStogunuIsle(baglanti, tenantId, odemeId, urunler, { rezerv
       [odemeId, tenantId, urunId, adet, rezervasyon ? "aktif" : "tuketildi"]
     );
   }
+  await siparisReceteStogunuIsle(baglanti, tenantId, odemeId, urunler, { rezervasyon, stokAciginaIzinVer });
 }
 
 export async function suresiDolanStokRezervasyonlariniBirak(isletmeId) {

@@ -137,6 +137,10 @@ import {
   tedarikciOdemesiKaydet, duzenliGiderKaydet, duzenliGiderArsivle,
   finansRaporunuGetir, giderButceleriniKaydet,
 } from "./giderDb.js";
+import {
+  receteTablolariniHazirla, receteStokMerkeziniGetir, hammaddeKaydet,
+  hammaddeStokHareketiKaydet, urunRecetesiKaydet,
+} from "./receteDb.js";
 import { landingChatYaniti } from "./landingChat.js";
 
 const app = express();
@@ -1115,6 +1119,22 @@ app.post(
   })
 );
 app.get("/api/admin/urunler", admin, guvenli(async (req) => ({ urunler: await urunleriGetir(req.isletme.id, { tumu: true, stokDetayi: true }) })));
+app.get("/api/admin/recete-stok", admin, guvenli(async (req) => receteStokMerkeziniGetir(req.isletme.id, pool)));
+app.post("/api/admin/hammaddeler", admin, guvenli(async (req) => {
+  const hammadde = await hammaddeKaydet(req.isletme.id, pool, req.body || {});
+  io.to(oda(req.isletme.id, "yonetim")).emit("recete-stok-guncellendi");
+  return { hammadde };
+}));
+app.post("/api/admin/hammaddeler/:id/stok-hareketi", admin, guvenli(async (req) => {
+  const sonuc = await hammaddeStokHareketiKaydet(req.isletme.id, pool, req.params.id, req.body || {}, req.kullanici?.id);
+  io.to(oda(req.isletme.id, "yonetim")).emit("recete-stok-guncellendi");
+  return sonuc;
+}));
+app.put("/api/admin/urunler/:id/recete", admin, guvenli(async (req) => {
+  await urunRecetesiKaydet(req.isletme.id, pool, req.params.id, req.body?.satirlar || []);
+  io.to(oda(req.isletme.id, "yonetim")).emit("recete-stok-guncellendi");
+  return { basarili: true };
+}));
 app.post("/api/admin/urunler", admin, guvenli(async (req) => {
   const t = req.isletme.id;
   const eski = req.body.id ? await yonetimVarliginiGetir(t, "urun", req.body.id) : null;
@@ -1648,6 +1668,7 @@ isletmeTablosunuHazirla()
   .then(() => rezervasyonTablosunuHazirla(pool))
   .then(() => degerlendirmeTablolariniHazirla(pool))
   .then(() => giderTablolariniHazirla(pool))
+  .then(() => receteTablolariniHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
   .then(() => ilkSuperAdminiHazirla())
