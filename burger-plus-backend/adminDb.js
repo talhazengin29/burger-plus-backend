@@ -608,8 +608,8 @@ export async function urunleriGetir(isletmeId, { tumu = false, stokDetayi = fals
       SELECT r.urun_id,
         GREATEST(0,MIN(FLOOR(h.stok_miktari/(r.miktar*(1+r.fire_orani/100)))))::int uretilebilir_adet,
         SUM(r.miktar*(1+r.fire_orani/100)*h.ortalama_birim_maliyet) recete_maliyeti
-      FROM urun_receteleri r
-      JOIN hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id AND h.aktif=true
+      FROM recete_urun_satirlari r
+      JOIN recete_hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id AND h.aktif=true
       WHERE r.isletme_id=$1 GROUP BY r.urun_id
     `, [tenantId]),
   ]);

@@ -61,7 +61,7 @@ export function receteMaliyetiHesapla(satirlar = []) {
 
 export async function receteTablolariniHazirla(pool) {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS hammaddeler (
+    CREATE TABLE IF NOT EXISTS recete_hammaddeler (
       id BIGSERIAL PRIMARY KEY,
       isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
       ad TEXT NOT NULL,
@@ -73,27 +73,27 @@ export async function receteTablolariniHazirla(pool) {
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS hammaddeler_isletme_ad_tek
-      ON hammaddeler (isletme_id, LOWER(ad));
-    CREATE INDEX IF NOT EXISTS hammaddeler_kritik_stok
-      ON hammaddeler (isletme_id, aktif, stok_miktari, minimum_stok);
+    CREATE UNIQUE INDEX IF NOT EXISTS recete_hammaddeler_isletme_ad_tek
+      ON recete_hammaddeler (isletme_id, LOWER(ad));
+    CREATE INDEX IF NOT EXISTS recete_hammaddeler_kritik_stok
+      ON recete_hammaddeler (isletme_id, aktif, stok_miktari, minimum_stok);
 
-    CREATE TABLE IF NOT EXISTS urun_receteleri (
+    CREATE TABLE IF NOT EXISTS recete_urun_satirlari (
       isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
       urun_id INTEGER NOT NULL REFERENCES urunler(id) ON DELETE CASCADE,
-      hammadde_id BIGINT NOT NULL REFERENCES hammaddeler(id) ON DELETE RESTRICT,
+      hammadde_id BIGINT NOT NULL REFERENCES recete_hammaddeler(id) ON DELETE RESTRICT,
       miktar NUMERIC(16,4) NOT NULL CHECK (miktar > 0),
       fire_orani NUMERIC(5,2) NOT NULL DEFAULT 0 CHECK (fire_orani >= 0 AND fire_orani <= 100),
       guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (isletme_id, urun_id, hammadde_id)
     );
-    CREATE INDEX IF NOT EXISTS urun_receteleri_hammadde
-      ON urun_receteleri (isletme_id, hammadde_id);
+    CREATE INDEX IF NOT EXISTS recete_urun_satirlari_hammadde
+      ON recete_urun_satirlari (isletme_id, hammadde_id);
 
-    CREATE TABLE IF NOT EXISTS hammadde_stok_hareketleri (
+    CREATE TABLE IF NOT EXISTS recete_stok_hareketleri (
       id UUID PRIMARY KEY,
       isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
-      hammadde_id BIGINT NOT NULL REFERENCES hammaddeler(id) ON DELETE RESTRICT,
+      hammadde_id BIGINT NOT NULL REFERENCES recete_hammaddeler(id) ON DELETE RESTRICT,
       tur TEXT NOT NULL CHECK (tur IN ('giris','fire','sayim','recete_tuketim')),
       miktar NUMERIC(16,4) NOT NULL,
       birim_maliyet NUMERIC(16,6) NOT NULL DEFAULT 0,
@@ -107,13 +107,13 @@ export async function receteTablolariniHazirla(pool) {
       olusturma TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (isletme_id, istek_anahtari)
     );
-    CREATE INDEX IF NOT EXISTS hammadde_hareketleri_tarih
-      ON hammadde_stok_hareketleri (isletme_id, hammadde_id, olusturma DESC);
+    CREATE INDEX IF NOT EXISTS recete_stok_hareketleri_tarih
+      ON recete_stok_hareketleri (isletme_id, hammadde_id, olusturma DESC);
 
-    CREATE TABLE IF NOT EXISTS hammadde_rezervasyonlari (
+    CREATE TABLE IF NOT EXISTS recete_stok_rezervasyonlari (
       odeme_id UUID NOT NULL REFERENCES odeme_islemleri(id) ON DELETE CASCADE,
       isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
-      hammadde_id BIGINT NOT NULL REFERENCES hammaddeler(id) ON DELETE RESTRICT,
+      hammadde_id BIGINT NOT NULL REFERENCES recete_hammaddeler(id) ON DELETE RESTRICT,
       miktar NUMERIC(16,4) NOT NULL CHECK (miktar > 0),
       birim_maliyet NUMERIC(16,6) NOT NULL DEFAULT 0,
       durum TEXT NOT NULL CHECK (durum IN ('aktif','tuketildi','birakildi')),
@@ -121,18 +121,18 @@ export async function receteTablolariniHazirla(pool) {
       guncelleme TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (odeme_id, hammadde_id)
     );
-    CREATE INDEX IF NOT EXISTS hammadde_rezervasyonlari_sure
-      ON hammadde_rezervasyonlari (isletme_id, durum, son_gecerlilik);
-    ALTER TABLE hammadde_rezervasyonlari
+    CREATE INDEX IF NOT EXISTS recete_stok_rezervasyonlari_sure
+      ON recete_stok_rezervasyonlari (isletme_id, durum, son_gecerlilik);
+    ALTER TABLE recete_stok_rezervasyonlari
       ADD COLUMN IF NOT EXISTS birim_maliyet NUMERIC(16,6) NOT NULL DEFAULT 0;
   `);
 }
 
 const HAMMADDE_SELECT = `
   SELECT h.*,
-    COALESCE((SELECT SUM(r.miktar) FROM hammadde_rezervasyonlari r
+    COALESCE((SELECT SUM(r.miktar) FROM recete_stok_rezervasyonlari r
       WHERE r.isletme_id=h.isletme_id AND r.hammadde_id=h.id AND r.durum='aktif'),0) rezerve_miktar
-  FROM hammaddeler h`;
+  FROM recete_hammaddeler h`;
 
 function hammaddeDonustur(satir) {
   const kullanilabilir = Number(satir.stok_miktari || 0);
@@ -159,8 +159,8 @@ export async function hammaddeKaydet(isletmeId, pool, veri) {
   try {
     if (hammadde.id) {
       const mevcut = await pool.query(`SELECT h.birim,EXISTS(
-        SELECT 1 FROM urun_receteleri r WHERE r.isletme_id=h.isletme_id AND r.hammadde_id=h.id
-      ) recetede_kullaniliyor FROM hammaddeler h WHERE h.isletme_id=$1 AND h.id=$2`, [id, hammadde.id]);
+        SELECT 1 FROM recete_urun_satirlari r WHERE r.isletme_id=h.isletme_id AND r.hammadde_id=h.id
+      ) recetede_kullaniliyor FROM recete_hammaddeler h WHERE h.isletme_id=$1 AND h.id=$2`, [id, hammadde.id]);
       if (!mevcut.rows[0]) throw new Error("Hammadde bulunamadı.");
       if (mevcut.rows[0].birim !== hammadde.birim) {
         throw new Error("Kayıtlı hammaddenin temel birimi değiştirilemez. Yeni bir hammadde oluşturun.");
@@ -169,13 +169,13 @@ export async function hammaddeKaydet(isletmeId, pool, veri) {
         throw new Error("Bu hammadde aktif ürün reçetelerinde kullanılıyor. Önce reçetelerden kaldırın.");
       }
       sonuc = await pool.query(
-        `UPDATE hammaddeler SET ad=$3,birim=$4,minimum_stok=$5,aktif=$6,guncelleme=NOW()
+        `UPDATE recete_hammaddeler SET ad=$3,birim=$4,minimum_stok=$5,aktif=$6,guncelleme=NOW()
          WHERE isletme_id=$1 AND id=$2 RETURNING *`,
         [id, hammadde.id, hammadde.ad, hammadde.birim, hammadde.minimumStok, hammadde.aktif]
       );
     } else {
       sonuc = await pool.query(
-        `INSERT INTO hammaddeler(isletme_id,ad,birim,minimum_stok,aktif) VALUES($1,$2,$3,$4,$5) RETURNING *`,
+        `INSERT INTO recete_hammaddeler(isletme_id,ad,birim,minimum_stok,aktif) VALUES($1,$2,$3,$4,$5) RETURNING *`,
         [id, hammadde.ad, hammadde.birim, hammadde.minimumStok, hammadde.aktif]
       );
     }
@@ -201,12 +201,12 @@ export async function hammaddeStokHareketiKaydet(isletmeId, pool, hammaddeId, ve
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
-    const tekrar = await baglanti.query("SELECT id FROM hammadde_stok_hareketleri WHERE isletme_id=$1 AND istek_anahtari=$2", [id, istekAnahtari]);
+    const tekrar = await baglanti.query("SELECT id FROM recete_stok_hareketleri WHERE isletme_id=$1 AND istek_anahtari=$2", [id, istekAnahtari]);
     if (tekrar.rows[0]) {
       await baglanti.query("COMMIT");
       return { tekrar: true };
     }
-    const sonuc = await baglanti.query("SELECT * FROM hammaddeler WHERE isletme_id=$1 AND id=$2 FOR UPDATE", [id, hamId]);
+    const sonuc = await baglanti.query("SELECT * FROM recete_hammaddeler WHERE isletme_id=$1 AND id=$2 FOR UPDATE", [id, hamId]);
     const hammadde = sonuc.rows[0];
     if (!hammadde) throw new Error("Hammadde bulunamadı.");
     const onceki = Number(hammadde.stok_miktari || 0);
@@ -219,12 +219,12 @@ export async function hammaddeStokHareketiKaydet(isletmeId, pool, hammaddeId, ve
       birimMaliyet = (maliyetliEskiStok * birimMaliyet + toplamMaliyet) / (maliyetliEskiStok + miktar);
     }
     await baglanti.query(
-      "UPDATE hammaddeler SET stok_miktari=$3,ortalama_birim_maliyet=$4,guncelleme=NOW() WHERE isletme_id=$1 AND id=$2",
+      "UPDATE recete_hammaddeler SET stok_miktari=$3,ortalama_birim_maliyet=$4,guncelleme=NOW() WHERE isletme_id=$1 AND id=$2",
       [id, hamId, sonraki, birimMaliyet]
     );
     const hareketMiktari = tur === "sayim" ? sonraki - onceki : tur === "fire" ? -miktar : miktar;
     await baglanti.query(
-      `INSERT INTO hammadde_stok_hareketleri
+      `INSERT INTO recete_stok_hareketleri
        (id,isletme_id,hammadde_id,tur,miktar,birim_maliyet,toplam_maliyet,onceki_stok,sonraki_stok,personel_id,aciklama,istek_anahtari)
        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [randomUUID(), id, hamId, tur, hareketMiktari, birimMaliyet, toplamMaliyet, onceki, sonraki, personelId || null, aciklama, istekAnahtari]
@@ -251,13 +251,13 @@ export async function urunRecetesiKaydet(isletmeId, pool, urunId, gelenSatirlar)
     const urunSonucu = await baglanti.query("SELECT id FROM urunler WHERE isletme_id=$1 AND id=$2 AND arsivli=false", [id, urun]);
     if (!urunSonucu.rows[0]) throw new Error("Ürün bulunamadı.");
     if (satirlar.length) {
-      const hammaddeler = await baglanti.query("SELECT id FROM hammaddeler WHERE isletme_id=$1 AND id=ANY($2::bigint[]) AND aktif=true", [id, satirlar.map((s) => s.hammaddeId)]);
+      const hammaddeler = await baglanti.query("SELECT id FROM recete_hammaddeler WHERE isletme_id=$1 AND id=ANY($2::bigint[]) AND aktif=true", [id, satirlar.map((s) => s.hammaddeId)]);
       if (hammaddeler.rows.length !== satirlar.length) throw new Error("Reçetede bulunamayan veya pasif bir hammadde var.");
     }
-    await baglanti.query("DELETE FROM urun_receteleri WHERE isletme_id=$1 AND urun_id=$2", [id, urun]);
+    await baglanti.query("DELETE FROM recete_urun_satirlari WHERE isletme_id=$1 AND urun_id=$2", [id, urun]);
     for (const satir of satirlar) {
       await baglanti.query(
-        `INSERT INTO urun_receteleri(isletme_id,urun_id,hammadde_id,miktar,fire_orani) VALUES($1,$2,$3,$4,$5)`,
+        `INSERT INTO recete_urun_satirlari(isletme_id,urun_id,hammadde_id,miktar,fire_orani) VALUES($1,$2,$3,$4,$5)`,
         [id, urun, satir.hammaddeId, satir.miktar, satir.fireOrani]
       );
     }
@@ -281,12 +281,12 @@ export async function receteStokMerkeziniGetir(isletmeId, pool) {
           'fireOrani',r.fire_orani,'birimMaliyet',h.ortalama_birim_maliyet
         ) ORDER BY h.ad) FILTER (WHERE h.id IS NOT NULL),'[]'::json) satirlar
       FROM urunler u
-      LEFT JOIN urun_receteleri r ON r.isletme_id=u.isletme_id AND r.urun_id=u.id
-      LEFT JOIN hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id
+      LEFT JOIN recete_urun_satirlari r ON r.isletme_id=u.isletme_id AND r.urun_id=u.id
+      LEFT JOIN recete_hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id
       WHERE u.isletme_id=$1 AND u.arsivli=false
       GROUP BY u.id,u.ad,u.fiyat ORDER BY u.ad`, [id]),
     pool.query(`SELECT s.id,s.hammadde_id,h.ad hammadde_adi,h.birim,s.tur,s.miktar,s.toplam_maliyet,s.onceki_stok,s.sonraki_stok,s.aciklama,s.olusturma
-      FROM hammadde_stok_hareketleri s JOIN hammaddeler h ON h.id=s.hammadde_id AND h.isletme_id=s.isletme_id
+      FROM recete_stok_hareketleri s JOIN recete_hammaddeler h ON h.id=s.hammadde_id AND h.isletme_id=s.isletme_id
       WHERE s.isletme_id=$1 ORDER BY s.olusturma DESC LIMIT 50`, [id]),
   ]);
   const receteler = receteSonucu.rows.map((satir) => {
@@ -320,11 +320,11 @@ export async function suresiDolanHammaddeRezervasyonlariniBirak(baglanti, isletm
   const id = tenantId(isletmeId);
   await baglanti.query(`
     WITH birakilan AS (
-      UPDATE hammadde_rezervasyonlari SET durum='birakildi',guncelleme=NOW()
+      UPDATE recete_stok_rezervasyonlari SET durum='birakildi',guncelleme=NOW()
       WHERE isletme_id=$1 AND durum='aktif' AND son_gecerlilik<=NOW()
       RETURNING hammadde_id,miktar
     ), toplam AS (SELECT hammadde_id,SUM(miktar) miktar FROM birakilan GROUP BY hammadde_id)
-    UPDATE hammaddeler h SET stok_miktari=h.stok_miktari+toplam.miktar,guncelleme=NOW()
+    UPDATE recete_hammaddeler h SET stok_miktari=h.stok_miktari+toplam.miktar,guncelleme=NOW()
     FROM toplam WHERE h.isletme_id=$1 AND h.id=toplam.hammadde_id`, [id]);
 }
 
@@ -334,7 +334,7 @@ export async function siparisReceteStogunuIsle(baglanti, isletmeId, odemeId, uru
   if (!adetler.size) return;
   const receteSonucu = await baglanti.query(
     `SELECT r.urun_id,r.hammadde_id,r.miktar,r.fire_orani,h.ad,h.stok_miktari,h.ortalama_birim_maliyet
-     FROM urun_receteleri r JOIN hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id
+     FROM recete_urun_satirlari r JOIN recete_hammaddeler h ON h.isletme_id=r.isletme_id AND h.id=r.hammadde_id
      WHERE r.isletme_id=$1 AND r.urun_id=ANY($2::int[]) AND h.aktif=true ORDER BY h.id FOR UPDATE OF h`,
     [id, [...adetler.keys()]]
   );
@@ -348,7 +348,7 @@ export async function siparisReceteStogunuIsle(baglanti, isletmeId, odemeId, uru
   }
   if (!gerekenler.size) return;
   const mevcutSonucu = await baglanti.query(
-    "SELECT hammadde_id,durum,birim_maliyet FROM hammadde_rezervasyonlari WHERE isletme_id=$1 AND odeme_id=$2 FOR UPDATE",
+    "SELECT hammadde_id,durum,birim_maliyet FROM recete_stok_rezervasyonlari WHERE isletme_id=$1 AND odeme_id=$2 FOR UPDATE",
     [id, odemeId]
   );
   const rezervasyonlar = new Map(mevcutSonucu.rows.map((r) => [Number(r.hammadde_id), { durum: r.durum, birimMaliyet: Number(r.birim_maliyet || 0) }]));
@@ -358,21 +358,21 @@ export async function siparisReceteStogunuIsle(baglanti, isletmeId, odemeId, uru
     const mevcutDurum = mevcutRezervasyon?.durum;
     if (mevcutDurum === "tuketildi") continue;
     if (!rezervasyon && mevcutDurum === "aktif") {
-      await baglanti.query("UPDATE hammadde_rezervasyonlari SET durum='tuketildi',guncelleme=NOW() WHERE odeme_id=$1 AND hammadde_id=$2", [odemeId, hammaddeId]);
+      await baglanti.query("UPDATE recete_stok_rezervasyonlari SET durum='tuketildi',guncelleme=NOW() WHERE odeme_id=$1 AND hammadde_id=$2", [odemeId, hammaddeId]);
     } else {
       if (rezervasyon && mevcutDurum === "aktif") continue;
       if (Number(satir.stok_miktari) < miktar && !stokAciginaIzinVer) throw new Error(`${satir.ad} stoğu reçete için yetersiz.`);
-      await baglanti.query("UPDATE hammaddeler SET stok_miktari=stok_miktari-$1,guncelleme=NOW() WHERE isletme_id=$2 AND id=$3", [miktar, id, hammaddeId]);
-      await baglanti.query(`INSERT INTO hammadde_rezervasyonlari(odeme_id,isletme_id,hammadde_id,miktar,birim_maliyet,durum,son_gecerlilik)
+      await baglanti.query("UPDATE recete_hammaddeler SET stok_miktari=stok_miktari-$1,guncelleme=NOW() WHERE isletme_id=$2 AND id=$3", [miktar, id, hammaddeId]);
+      await baglanti.query(`INSERT INTO recete_stok_rezervasyonlari(odeme_id,isletme_id,hammadde_id,miktar,birim_maliyet,durum,son_gecerlilik)
         VALUES($1,$2,$3,$4,$5,$6,NOW()+INTERVAL '20 minutes') ON CONFLICT(odeme_id,hammadde_id) DO UPDATE SET
         miktar=EXCLUDED.miktar,birim_maliyet=EXCLUDED.birim_maliyet,durum=EXCLUDED.durum,son_gecerlilik=EXCLUDED.son_gecerlilik,guncelleme=NOW()`,
         [odemeId, id, hammaddeId, miktar, Number(satir.ortalama_birim_maliyet || 0), rezervasyon ? "aktif" : "tuketildi"]);
     }
     if (!rezervasyon) {
-      const sonrakiSonucu = await baglanti.query("SELECT stok_miktari FROM hammaddeler WHERE isletme_id=$1 AND id=$2", [id, hammaddeId]);
+      const sonrakiSonucu = await baglanti.query("SELECT stok_miktari FROM recete_hammaddeler WHERE isletme_id=$1 AND id=$2", [id, hammaddeId]);
       const sonraki = Number(sonrakiSonucu.rows[0]?.stok_miktari || 0);
       const tuketimBirimMaliyeti = mevcutDurum === "aktif" ? mevcutRezervasyon.birimMaliyet : Number(satir.ortalama_birim_maliyet || 0);
-      await baglanti.query(`INSERT INTO hammadde_stok_hareketleri
+      await baglanti.query(`INSERT INTO recete_stok_hareketleri
         (id,isletme_id,hammadde_id,tur,miktar,birim_maliyet,toplam_maliyet,onceki_stok,sonraki_stok,odeme_id,aciklama,istek_anahtari)
         VALUES($1,$2,$3,'recete_tuketim',$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(isletme_id,istek_anahtari) DO NOTHING`,
         [randomUUID(), id, hammaddeId, -miktar, tuketimBirimMaliyeti, Number((miktar * tuketimBirimMaliyeti).toFixed(2)), sonraki + miktar, sonraki, odemeId, "Sipariş reçete tüketimi", `recete:${odemeId}:${hammaddeId}`]);
