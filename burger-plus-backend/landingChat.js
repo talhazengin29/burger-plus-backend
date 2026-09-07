@@ -5,7 +5,7 @@ const EN_FAZLA_MESAJ = 600;
 const EN_FAZLA_GECMIS = 6;
 
 const BILGI_TABANI = `
-orQRestro, restoran ve kafeler icin web tabanli QR menu ve siparis platformudur.
+Menüle, restoran ve kafeler icin web tabanli QR menu ve siparis platformudur.
 Musteri uygulama indirmeden masadaki QR kodu tarayarak menuyu acar ve siparis verebilir.
 Ozellikler: QR ile siparis, canli mutfak ve salon paneli, sadakat puani ve dijital damga karti,
 iyzico ile online odeme, satis raporlari, urun-kategori-kampanya yonetimi, logo ve renk ozellestirme.
@@ -55,7 +55,7 @@ const HAZIR_CEVAPLAR = [
   },
   {
     anahtarlar: ["merhaba", "selam", "hey", "iyi gunler", "iyi günler"],
-    cevap: "Merhaba! orQRestro'nun fiyatları, özellikleri, kurulumu veya ücretsiz denemesi hakkında yardımcı olabilirim. Neyi merak ediyorsunuz?",
+    cevap: "Merhaba! Menüle'nin fiyatları, özellikleri, kurulumu veya ücretsiz denemesi hakkında yardımcı olabilirim. Neyi merak ediyorsunuz?",
   },
 ];
 
@@ -68,6 +68,10 @@ const YANIT_SEMASI = {
 
 function normallestir(metin) {
   return String(metin || "").trim().toLocaleLowerCase("tr-TR");
+}
+
+function eskiMarkayiTemizle(metin) {
+  return String(metin || "").replace(/\borq\s*restro\b/gi, "Menüle");
 }
 
 export function hazirLandingCevabi(mesaj) {
@@ -100,7 +104,7 @@ function geminiMetniniOku(veri) {
   const ayrismis = JSON.parse(ham);
   const cevap = String(ayrismis?.answer || "").trim();
   if (!cevap) throw new Error("Gemini yanıtı geçersiz.");
-  return cevap.slice(0, 900);
+  return eskiMarkayiTemizle(cevap).slice(0, 900);
 }
 
 async function geminiLandingCevabi(mesaj, gecmis, fetchImpl) {
@@ -113,7 +117,7 @@ async function geminiLandingCevabi(mesaj, gecmis, fetchImpl) {
       headers: { "x-goog-api-key": process.env.GEMINI_API_KEY, "Content-Type": "application/json" },
       signal: denetleyici.signal,
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: `Sen orQRestro landing sayfasının Türkçe satış destek asistanısın. Yalnızca aşağıdaki doğrulanmış bilgilerle kısa, doğal ve en fazla 3 cümleyle cevap ver. Bilmediğin konuda tahmin yürütme; iletişim formuna yönlendir.\n\n${BILGI_TABANI}` }] },
+        systemInstruction: { parts: [{ text: `Sen Menüle landing sayfasının Türkçe satış destek asistanısın. Platformun adı yalnızca Menüle'dir; eski veya farklı bir marka adı kullanma. Yalnızca aşağıdaki doğrulanmış bilgilerle kısa, doğal ve en fazla 3 cümleyle cevap ver. Bilmediğin konuda tahmin yürütme; iletişim formuna yönlendir.\n\n${BILGI_TABANI}` }] },
         contents: [...gecmisiTemizle(gecmis), { role: "user", parts: [{ text: mesaj }] }],
         generationConfig: { temperature: 0.2, maxOutputTokens: 240, responseMimeType: "application/json", responseJsonSchema: YANIT_SEMASI },
       }),
@@ -131,7 +135,7 @@ export async function landingChatYaniti({ mesaj, gecmis }, fetchImpl = fetch) {
   if (temizMesaj.length > EN_FAZLA_MESAJ) return { hata: `Mesaj en fazla ${EN_FAZLA_MESAJ} karakter olabilir.`, durum: 400 };
 
   const hazir = hazirLandingCevabi(temizMesaj);
-  if (hazir) return { cevap: hazir, kaynak: "hazir" };
+  if (hazir) return { cevap: eskiMarkayiTemizle(hazir), kaynak: "hazir" };
 
   try {
     const aiCevabi = await geminiLandingCevabi(temizMesaj, gecmis, fetchImpl);
