@@ -27,8 +27,8 @@ export function basvuruVerisiniTemizle(veri = {}) {
   if (isletmeAdi.length < 2) throw new Error("İşletme adı en az 2 karakter olmalıdır.");
   if (!/^(90)?0?\d{10}$/.test(telefon)) throw new Error("Telefon numarası geçersiz.");
   if (email && !EMAIL_DESENI.test(email)) throw new Error("E-posta adresi geçersiz.");
-  if (masaSayisi != null && (!Number.isSafeInteger(masaSayisi) || masaSayisi < 1 || masaSayisi > 999)) {
-    throw new Error("Masa sayısı 1 ile 999 arasında olmalıdır.");
+  if (masaSayisi != null && (!Number.isSafeInteger(masaSayisi) || masaSayisi < 1 || masaSayisi > 500)) {
+    throw new Error("Masa sayısı 1 ile 500 arasında olmalıdır.");
   }
   if (!PAKETLER.has(paket)) throw new Error("Paket seçimi geçersiz.");
   if (veri.kvkkOnay !== true) throw new Error("KVKK aydınlatma metni onaylanmalıdır.");
@@ -99,6 +99,13 @@ export async function basvuruTablosunuHazirla(pool) {
       ON satis_basvurulari(telefon, olusturma DESC);
     CREATE INDEX IF NOT EXISTS satis_basvurulari_ip_zaman_idx
       ON satis_basvurulari(ip_hash, olusturma DESC);
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='satis_basvurulari_masa_sayisi_v2_check') THEN
+        ALTER TABLE satis_basvurulari
+          ADD CONSTRAINT satis_basvurulari_masa_sayisi_v2_check
+          CHECK (masa_sayisi BETWEEN 1 AND 500) NOT VALID;
+      END IF;
+    END $$;
   `);
 }
 

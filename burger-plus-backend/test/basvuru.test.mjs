@@ -24,6 +24,14 @@ test("landing başvurusu normalize edilir", () => {
   assert.equal(sonuc.masaSayisi, 12);
 });
 
+test("masa sayısı gerçekçi işletme sınırlarında tutulur", () => {
+  assert.equal(basvuruVerisiniTemizle({ ...gecerli, masaSayisi: "1" }).masaSayisi, 1);
+  assert.equal(basvuruVerisiniTemizle({ ...gecerli, masaSayisi: "500" }).masaSayisi, 500);
+  assert.throws(() => basvuruVerisiniTemizle({ ...gecerli, masaSayisi: "0" }), /1 ile 500/);
+  assert.throws(() => basvuruVerisiniTemizle({ ...gecerli, masaSayisi: "501" }), /1 ile 500/);
+  assert.throws(() => basvuruVerisiniTemizle({ ...gecerli, masaSayisi: "10.5" }), /1 ile 500/);
+});
+
 test("honeypot dolduran bot ayrıntı vermeden kabul edilmiş görünür", () => {
   assert.deepEqual(basvuruVerisiniTemizle({ ...gecerli, website: "https://spam.example" }), { bot: true });
 });
