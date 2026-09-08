@@ -142,6 +142,10 @@ import {
   hammaddeStokHareketiKaydet, urunRecetesiKaydet,
 } from "./receteDb.js";
 import { landingChatYaniti } from "./landingChat.js";
+import {
+  basvuruTablosunuHazirla, landingBasvurusuOlustur,
+  superBasvurulariGetir, superBasvuruOzetiniGetir, superBasvuruGuncelle,
+} from "./basvuruDb.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -248,6 +252,13 @@ const landingChatLimiti = rateLimit({
   legacyHeaders: false,
   message: { hata: "Sohbet sınırına ulaştınız. Lütfen birkaç dakika sonra tekrar deneyin." },
 });
+const landingBasvuruLimiti = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: URETIM ? 5 : 50,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { hata: "Çok fazla başvuru gönderildi. Lütfen 15 dakika sonra tekrar deneyin." },
+});
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -299,6 +310,27 @@ app.post("/api/landing/chat", landingChatLimiti, async (req, res) => {
   const sonuc = await landingChatYaniti(req.body || {});
   if (sonuc.hata) return res.status(sonuc.durum || 400).json({ hata: sonuc.hata });
   res.json(sonuc);
+});
+
+// Tanıtım sitesi başvuruları tenant bağlamından bağımsızdır. Honeypot ve süre
+// kontrolü basvuruDb içinde; IP sınırı hem uygulama hem veritabanı katmanındadır.
+app.post("/api/landing/basvurular", landingBasvuruLimiti, async (req, res) => {
+  try {
+    const sonuc = await landingBasvurusuOlustur(pool, req.body || {}, {
+      ip: req.ip || req.socket.remoteAddress || "",
+      ipTuzu: process.env.BASVURU_IP_TUZU || process.env.JWT_SECRET || "menule-basvuru",
+      userAgent: req.headers["user-agent"] || "",
+      kampanya: {
+        source: req.body?.utmSource,
+        medium: req.body?.utmMedium,
+        campaign: req.body?.utmCampaign,
+        referrer: req.body?.referrer,
+      },
+    });
+    res.status(201).json({ basarili: true, basvuruId: sonuc.basvuru?.id || null });
+  } catch (e) {
+    res.status(e.status || 400).json({ hata: e.message || "Başvuru alınamadı." });
+  }
 });
 
 async function isletmeMiddleware(req, res, next) {
@@ -1016,6 +1048,17 @@ app.put("/api/super/abonelikler/:id", superAdmin, guvenli(async (req, res) => {
 }));
 app.get("/api/super/gelir", superAdmin, guvenli((req) => gelirRaporunuGetir(req.query.ay)));
 
+app.get("/api/super/basvurular", superAdmin, guvenli(async (req) => ({
+  basvurular: await superBasvurulariGetir(pool, req.query || {}),
+  ozet: await superBasvuruOzetiniGetir(pool),
+})));
+app.patch("/api/super/basvurular/:id", superAdmin, guvenli(async (req, res) => {
+  const basvuru = await superBasvuruGuncelle(pool, req.params.id, req.body || {}, req.superAdmin.id);
+  res.locals.denetimIslemi = "satis-basvurusu-guncelleme";
+  res.locals.denetimDetay = { basvuruId: basvuru.id, durum: basvuru.durum };
+  return { basvuru };
+}));
+
 app.post("/api/super/isletmeler/:id/erisim-tokeni", superAdmin, guvenli(async (req, res) => {
   const isletme = await superIsletmeDetayiGetir(req.params.id);
   if (!isletme || isletme.silinmeTarihi) throw new Error("İşletme bulunamadı veya silinmek üzere işaretli.");
@@ -1673,6 +1716,7 @@ isletmeTablosunuHazirla()
   .then(() => receteTablolariniHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
+  .then(() => basvuruTablosunuHazirla(pool))
   .then(() => ilkSuperAdminiHazirla())
   .then(() => {
     httpServer.listen(PORT, "0.0.0.0", () => {
