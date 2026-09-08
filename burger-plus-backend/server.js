@@ -11,7 +11,7 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 import helmet from "helmet";
-import { rateLimit } from "express-rate-limit";
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
 import pool, {
   tablolariHazirla,
   masaSiparisleriniGetir,
@@ -151,6 +151,14 @@ const app = express();
 app.disable("x-powered-by");
 const URETIM = process.env.NODE_ENV === "production";
 if (URETIM) app.set("trust proxy", 1);
+function istemciHataMesaji(hata, varsayilan) {
+  const mesaj = String(hata?.message || "").trim();
+  const altyapiKodu = /^\d{5}$/.test(String(hata?.code || ""))
+    || /^(ECONN|ENOTFOUND|ETIMEDOUT|EAI_)/.test(String(hata?.code || ""));
+  const altyapiMesaji = /(SELECT|INSERT|UPDATE|DELETE|ALTER TABLE|column |relation |constraint |syntax error|ECONN|stack)/i.test(mesaj);
+  if (!mesaj || (URETIM && (altyapiKodu || altyapiMesaji))) return varsayilan;
+  return mesaj.slice(0, 240);
+}
 function originiNormallestir(origin) {
   const ham = String(origin || "").trim();
   if (!ham) return "";
@@ -165,13 +173,16 @@ function originiNormallestir(origin) {
   }
 }
 const izinliOriginler = new Set(
-  [process.env.FRONTEND_URL, "https://burgerplus.vercel.app", ...(process.env.CORS_ORIGINS || "").split(",")]
+  [process.env.FRONTEND_URL, ...(process.env.CORS_ORIGINS || "").split(",")]
     .map(originiNormallestir)
     .filter(Boolean)
 );
 if (!URETIM) {
   ["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://localhost:5176", "http://127.0.0.1:5173", "http://127.0.0.1:5174", "http://127.0.0.1:5175", "http://127.0.0.1:5176"]
     .forEach((origin) => izinliOriginler.add(origin));
+}
+if (URETIM && izinliOriginler.size === 0) {
+  throw new Error("Production ortamında FRONTEND_URL veya CORS_ORIGINS tanımlanmalıdır.");
 }
 function originIzinli(origin) {
   return !origin || izinliOriginler.has(originiNormallestir(origin));
@@ -185,6 +196,8 @@ const corsAyarlari = {
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-Isletme", "X-Masa-Token", "X-Masa-Oturum"],
+  maxAge: 600,
+  optionsSuccessStatus: 204,
 };
 // İyzico'nun ödeme sayfası callback'i tarayıcıdan otomatik form-post ile
 // gönderir; bu istek kendi domainini Origin header'ında taşır ve frontend
@@ -197,6 +210,28 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false, limit: "20kb" }));
+function istekGovdesiGuvenliMi(deger, derinlik = 0, durum = { alan: 0 }) {
+  if (deger == null || typeof deger !== "object") return true;
+  if (derinlik > 8 || durum.alan > 250) return false;
+  if (Array.isArray(deger) && deger.length > 100) return false;
+  for (const [anahtar, altDeger] of Object.entries(deger)) {
+    durum.alan += 1;
+    if (["__proto__", "prototype", "constructor"].includes(anahtar)) return false;
+    if (!istekGovdesiGuvenliMi(altDeger, derinlik + 1, durum)) return false;
+  }
+  return durum.alan <= 250;
+}
+app.use("/api", (req, res, next) => {
+  if (!istekGovdesiGuvenliMi(req.body)) {
+    return res.status(400).json({ hata: "İstek gövdesi izin verilen yapıyı aşıyor." });
+  }
+  const kimlikYaniti = /^\/(?:giris(?:-genel)?|giris\/|kayit$|ben$|sifre-sifir)/.test(req.path);
+  if (req.headers.authorization || kimlikYaniti || req.path.startsWith("/admin") || req.path.startsWith("/super")) {
+    res.set("Cache-Control", "no-store");
+    res.set("Pragma", "no-cache");
+  }
+  next();
+});
 const genelApiLimiti = rateLimit({
   windowMs: 60_000,
   limit: URETIM ? 300 : 1200,
@@ -215,6 +250,18 @@ const yonetimApiLimiti = rateLimit({
 app.use("/api/admin", yonetimApiLimiti);
 app.use("/api", genelApiLimiti);
 const kimlikLimiti = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false });
+const kimlikEmailLimiti = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 5,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => {
+    const email = String(req.body?.email || "").trim().toLowerCase().slice(0, 254);
+    return email ? `email:${email}` : `ip:${ipKeyGenerator(req.ip)}`;
+  },
+  message: { hata: "Çok fazla başarısız giriş denemesi yapıldı. 15 dakika sonra tekrar deneyin." },
+});
 const sifreSifirlamaLimiti = rateLimit({
   windowMs: 15 * 60_000, limit: 5, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla istek gönderildi. Lütfen kısa süre sonra tekrar deneyin." },
@@ -259,10 +306,20 @@ const landingBasvuruLimiti = rateLimit({
   legacyHeaders: false,
   message: { hata: "Çok fazla başvuru gönderildi. Lütfen 15 dakika sonra tekrar deneyin." },
 });
+const dosyaYuklemeLimiti = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: URETIM ? 30 : 150,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { hata: "Dosya yükleme sınırına ulaşıldı. Lütfen daha sonra tekrar deneyin." },
+});
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: corsAyarlari,
+  maxHttpBufferSize: 100_000,
+  perMessageDeflate: false,
+  allowRequest: (req, callback) => callback(null, originIzinli(req.headers.origin)),
 });
 const oda = (isletmeId, ad) => `i${isletmeId}:${ad}`;
 
@@ -298,7 +355,7 @@ app.get("/api/isletme/:slug", async (req, res) => {
 // Tek panelden giris: hangi isletmeye ait oldugu X-Isletme header'i olmadan,
 // yalnizca e-posta+sifreden bulunur (bkz. auth.js#girisYapGenel). Bu yuzden
 // isletmeMiddleware'den ONCE tanimli olmali; aksi halde header zorunlu hale gelir.
-app.post("/api/giris-genel", kimlikLimiti, async (req, res) => {
+app.post("/api/giris-genel", kimlikLimiti, kimlikEmailLimiti, async (req, res) => {
   const sonuc = await girisYapGenel(req.body);
   if (sonuc.hata) return res.status(401).json(sonuc);
   res.json(sonuc);
@@ -329,7 +386,7 @@ app.post("/api/landing/basvurular", landingBasvuruLimiti, async (req, res) => {
     });
     res.status(201).json({ basarili: true, basvuruId: sonuc.basvuru?.id || null });
   } catch (e) {
-    res.status(e.status || 400).json({ hata: e.message || "Başvuru alınamadı." });
+    res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Başvuru alınamadı.") });
   }
 });
 
@@ -365,7 +422,7 @@ app.post("/api/kayit", kimlikLimiti, async (req, res) => {
 });
 
 // Giris yap
-app.post("/api/giris", kimlikLimiti, async (req, res) => {
+app.post("/api/giris", kimlikLimiti, kimlikEmailLimiti, async (req, res) => {
   const sonuc = await girisYap(req.isletme.id, req.body);
   if (sonuc.hata) return res.status(401).json(sonuc);
   res.json(sonuc);
@@ -391,11 +448,11 @@ app.post("/api/sifre-sifirlama-talep", sifreSifirlamaLimiti, async (req, res) =>
   res.json({ mesaj: "E-posta adresiniz kayıtlıysa sıfırlama bağlantısı gönderildi." });
 });
 
-app.get("/api/sifre-sifirla/dogrula", async (req, res) => {
-  res.json({ gecerli: await sifirlamaTokenGecerliMi(req.isletme.id, req.query?.token) });
+app.post("/api/sifre-sifirla/dogrula", sifreSifirlamaLimiti, async (req, res) => {
+  res.json({ gecerli: await sifirlamaTokenGecerliMi(req.isletme.id, req.body?.token) });
 });
 
-app.post("/api/sifre-sifirla", async (req, res) => {
+app.post("/api/sifre-sifirla", sifreSifirlamaLimiti, async (req, res) => {
   const sonuc = await sifreyiSifirla(req.isletme.id, req.body?.token, req.body?.yeniSifre);
   if (sonuc.hata) return res.status(400).json(sonuc);
   res.json(sonuc);
@@ -428,7 +485,7 @@ app.get("/api/davetim", korumaliMiddleware(), async (req, res) => {
   try {
     res.json({ davet: await davetOzetiniGetir(req.isletme.id, req.kullanici.id) });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Davet bilgileri alınamadı." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "Davet bilgileri alınamadı.") });
   }
 });
 
@@ -448,14 +505,14 @@ app.post("/api/siparislerim/:id/degerlendirme", korumaliMiddleware(), async (req
     const degerlendirme = await siparisDegerlendirmesiOlustur(req.isletme.id, req.kullanici.id, req.params.id, req.body || {}, pool);
     io.to(oda(req.isletme.id, "yonetim")).emit("degerlendirmeler-guncellendi", { id: degerlendirme.id });
     res.status(201).json({ degerlendirme });
-  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Değerlendirme kaydedilemedi." }); }
+  } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Değerlendirme kaydedilemedi.") }); }
 });
 
 app.get("/api/sadakat", korumaliMiddleware(), async (req, res) => {
   try {
     res.json({ sadakat: await sadakatOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Sadakat bilgileri alinamadi." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "Sadakat bilgileri alinamadi.") });
   }
 });
 
@@ -463,7 +520,7 @@ app.get("/api/cuzdan", korumaliMiddleware(), async (req, res) => {
   try {
     res.json({ cuzdan: await cuzdanOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Cüzdan bilgileri alınamadı." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "Cüzdan bilgileri alınamadı.") });
   }
 });
 
@@ -472,7 +529,7 @@ app.post("/api/sadakat/oduller/:id/satin-al", korumaliMiddleware(), async (req, 
     await puanlaOdulSatinAl(req.isletme.id, pool, req.kullanici.id, req.params.id, req.body?.istekAnahtari);
     res.json({ sadakat: await sadakatOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Odul alinamadi." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "Odul alinamadi.") });
   }
 });
 
@@ -488,7 +545,7 @@ app.post("/api/sadakat/hediyeler/:id/kullan", korumaliMiddleware(), async (req, 
       sadakat: await sadakatOzetiniGetir(req.isletme.id, pool, req.kullanici.id),
     });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Hediye kullanilamadi." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "Hediye kullanilamadi.") });
   }
 });
 
@@ -516,7 +573,7 @@ app.post("/api/masa/:masaNo/cagri-oturumu", personelCagriOturumLimiti, async (re
     }
     const oturum = await masaCagriOturumuBaslat(req.isletme.id, pool, masaNo, req.body?.cihazAnahtari);
     res.status(201).json({ oturum });
-  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Masa oturumu açılamadı." }); }
+  } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Masa oturumu açılamadı.") }); }
 });
 
 app.get("/api/masa/:masaNo/personel-cagrisi", async (req, res) => {
@@ -525,7 +582,7 @@ app.get("/api/masa/:masaNo/personel-cagrisi", async (req, res) => {
     if (!masaNo) return res.status(400).json({ hata: "Masa numarası geçersiz." });
     const cagri = await masaPersonelCagrisiniGetir(req.isletme.id, pool, masaNo, req.headers["x-masa-oturum"]);
     res.json({ cagri });
-  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Personel çağrısı alınamadı." }); }
+  } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Personel çağrısı alınamadı.") }); }
 });
 
 app.post("/api/masa/:masaNo/personel-cagrisi", personelCagriLimiti, async (req, res) => {
@@ -538,7 +595,7 @@ app.post("/api/masa/:masaNo/personel-cagrisi", personelCagriLimiti, async (req, 
     io.to(oda(req.isletme.id, `masa-${masaNo}`)).emit("personel-cagrisi-guncellendi", cagri);
     await personelCagrilariniYayinla(req.isletme.id);
     res.status(201).json({ cagri });
-  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Personel çağrılamadı." }); }
+  } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Personel çağrılamadı.") }); }
 });
 
 app.get("/api/personel/personel-cagrilari", rolMiddleware(["salon", "kasiyer"]), async (req, res) => {
@@ -551,14 +608,14 @@ app.patch("/api/personel/personel-cagrilari/:id", rolMiddleware(["salon", "kasiy
     io.to(oda(req.isletme.id, `masa-${cagri.masaNo}`)).emit("personel-cagrisi-guncellendi", cagri);
     await personelCagrilariniYayinla(req.isletme.id);
     res.json({ cagri });
-  } catch (e) { res.status(400).json({ hata: e.message || "Çağrı güncellenemedi." }); }
+  } catch (e) { res.status(400).json({ hata: istemciHataMesaji(e, "Çağrı güncellenemedi.") }); }
 });
 
 const rezervasyonRolu = () => rolMiddleware(["salon", "kasiyer"]);
 app.get("/api/personel/rezervasyonlar", rezervasyonRolu(), async (req, res) => res.json({ rezervasyonlar: await rezervasyonlariGetir(req.isletme.id, pool, req.query) }));
-app.post("/api/personel/rezervasyonlar", rezervasyonRolu(), async (req, res) => { try { res.status(201).json({ rezervasyon: await rezervasyonOlustur(req.isletme.id,pool,req.body,req.kullanici?.id) }); } catch(e){ res.status(e.status||400).json({hata:e.message||"Rezervasyon oluşturulamadı."}); } });
-app.patch("/api/personel/rezervasyonlar/:id", rezervasyonRolu(), async (req,res)=>{try{res.json({rezervasyon:await rezervasyonGuncelle(req.isletme.id,pool,req.params.id,req.body,req.kullanici?.id)});}catch(e){res.status(e.status||400).json({hata:e.message||"Rezervasyon güncellenemedi."});}});
-app.delete("/api/personel/rezervasyonlar/:id", rezervasyonRolu(), async (req,res)=>{try{await rezervasyonSil(req.isletme.id,pool,req.params.id);res.status(204).end();}catch(e){res.status(e.status||400).json({hata:e.message||"Rezervasyon silinemedi."});}});
+app.post("/api/personel/rezervasyonlar", rezervasyonRolu(), async (req, res) => { try { res.status(201).json({ rezervasyon: await rezervasyonOlustur(req.isletme.id,pool,req.body,req.kullanici?.id) }); } catch(e){ res.status(e.status||400).json({hata:istemciHataMesaji(e,"Rezervasyon oluşturulamadı.")}); } });
+app.patch("/api/personel/rezervasyonlar/:id", rezervasyonRolu(), async (req,res)=>{try{res.json({rezervasyon:await rezervasyonGuncelle(req.isletme.id,pool,req.params.id,req.body,req.kullanici?.id)});}catch(e){res.status(e.status||400).json({hata:istemciHataMesaji(e,"Rezervasyon güncellenemedi.")});}});
+app.delete("/api/personel/rezervasyonlar/:id", rezervasyonRolu(), async (req,res)=>{try{await rezervasyonSil(req.isletme.id,pool,req.params.id);res.status(204).end();}catch(e){res.status(e.status||400).json({hata:istemciHataMesaji(e,"Rezervasyon silinemedi.")});}});
 app.get("/api/personel/salon-krokisi", rezervasyonRolu(), async (req, res) => {
   res.json({ kroki: await salonKrokisiniGetir(req.isletme.id, pool) });
 });
@@ -603,7 +660,7 @@ app.post("/api/odeme/taslak", opsiyonelKullaniciMiddleware(), async (req, res) =
     });
     res.status(201).json({ odeme });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Ödeme taslağı oluşturulamadı." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "Ödeme taslağı oluşturulamadı.") });
   }
 });
 
@@ -619,7 +676,7 @@ app.post("/api/odeme/:id/simulasyon-onay", opsiyonelKullaniciMiddleware(), async
     await onaylananOdemeyiMutfagaAktar(odeme);
     res.json({ odeme: { ...odeme, mutfagaAktarildi: true } });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Test ödemesi onaylanamadı." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "Test ödemesi onaylanamadı.") });
   }
 });
 
@@ -632,7 +689,7 @@ app.post("/api/odeme/:id/cuzdan-onay", korumaliMiddleware(), async (req, res) =>
     await onaylananOdemeyiMutfagaAktar(odeme);
     res.json({ odeme: { ...odeme, mutfagaAktarildi: true }, cuzdan: await cuzdanOzetiniGetir(req.isletme.id, pool, req.kullanici.id) });
   } catch (e) {
-    res.status(400).json({ hata: e.message || "Cüzdan ödemesi tamamlanamadı." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "Cüzdan ödemesi tamamlanamadı.") });
   }
 });
 
@@ -654,7 +711,7 @@ app.post("/api/odeme/:id/iyzico-baslat", opsiyonelKullaniciMiddleware(), async (
       kod: e.iyzicoKod || "yok",
       ortam: String(process.env.IYZICO_BASE_URL || "sandbox").trim(),
     });
-    res.status(400).json({ hata: e.message || "İyzico ödeme formu başlatılamadı." });
+    res.status(400).json({ hata: istemciHataMesaji(e, "İyzico ödeme formu başlatılamadı.") });
   }
 });
 
@@ -698,7 +755,7 @@ app.post("/api/odeme/:id/iyzico-dogrula", opsiyonelKullaniciMiddleware(), async 
     res.json({ odeme: kesinlesen });
   } catch (e) {
     console.error("İyzico ödeme yeniden doğrulama:", { odemeId: req.params.id, mesaj: e.message });
-    res.status(409).json({ hata: e.message || "Ödeme henüz doğrulanamadı." });
+    res.status(409).json({ hata: istemciHataMesaji(e, "Ödeme henüz doğrulanamadı.") });
   }
 });
 
@@ -744,7 +801,7 @@ async function yerelAdminKurulum(req, res) {
     await ilkYerelAdminOlustur(req.isletme.id, req.body || {});
     res.json({ basarili: true });
   } catch (e) {
-    res.status(400).json({ hata: e.message });
+    res.status(400).json({ hata: istemciHataMesaji(e, "İlk yönetici oluşturulamadı.") });
   }
 }
 
@@ -755,7 +812,7 @@ const guvenli = (islem) => async (req, res) => {
     if (!res.headersSent) res.json(veri ?? { basarili: true });
   } catch (e) {
     console.error("Admin API:", e.message);
-    if (!res.headersSent) res.status(400).json({ hata: e.message || "İşlem tamamlanamadı." });
+    if (!res.headersSent) res.status(400).json({ hata: istemciHataMesaji(e, "İşlem tamamlanamadı.") });
   }
 };
 
@@ -773,11 +830,12 @@ const nakitDegisikliginiYayinla = (tenantId, masaNo, siparis = null) => {
 app.get("/api/sikayetlerim", korumaliMiddleware(), async (req, res) => {
   try {
     res.json({ sikayetler: await musteriSikayetleriniGetir(req.isletme.id, pool, req.kullanici.id) });
-  } catch (e) { res.status(400).json({ hata: e.message || "Şikayetler alınamadı." }); }
+  } catch (e) { res.status(400).json({ hata: istemciHataMesaji(e, "Şikayetler alınamadı.") }); }
 });
 
 app.post(
   "/api/sikayet-gorseli",
+  dosyaYuklemeLimiti,
   sikayetLimiti,
   korumaliMiddleware(),
   express.raw({ type: ["image/png", "image/jpeg", "image/webp"], limit: "5mb" }),
@@ -785,7 +843,7 @@ app.post(
     try {
       const gorselUrl = await sikayetGorseliYukle(req.body, req.isletme.id, req.kullanici.id, req.headers["content-type"]);
       res.status(201).json({ gorselUrl });
-    } catch (e) { res.status(400).json({ hata: e.message || "Görsel yüklenemedi." }); }
+    } catch (e) { res.status(400).json({ hata: istemciHataMesaji(e, "Görsel yüklenemedi.") }); }
   }
 );
 
@@ -797,7 +855,7 @@ app.post("/api/sikayetler", sikayetLimiti, korumaliMiddleware(), async (req, res
     const sikayet = await sikayetOlustur(req.isletme.id, pool, req.kullanici.id, req.body || {});
     io.to(oda(req.isletme.id, "yonetim")).emit("sikayetler-guncellendi", { id: sikayet.id, durum: sikayet.durum });
     res.status(201).json({ sikayet });
-  } catch (e) { res.status(e.status || 400).json({ hata: e.message || "Şikayet gönderilemedi." }); }
+  } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Şikayet gönderilemedi.") }); }
 });
 
 app.get("/api/nakit/masa/:masaNo/durum", guvenli(async (req, res) => {
@@ -864,7 +922,7 @@ app.get("/api/kasa/cuzdan/son-yuklemeler", salonRolu(), guvenli(async (req) => (
 app.post("/api/kasa/cuzdan/yukle", salonRolu(), guvenli(async (req) => {
   const t = req.isletme.id;
   const yukleme = await kasadanCuzdanYukle(t, pool, req.kullanici.id, req.body || {});
-  io.to(oda(t, "genel")).emit("cuzdan-guncellendi", { kullaniciId: Number(req.body?.kullaniciId), bakiye: yukleme.bakiye });
+  io.to(oda(t, `kullanici-${Number(req.body?.kullaniciId)}`)).emit("cuzdan-guncellendi", { bakiye: yukleme.bakiye });
   io.to(oda(t, "salon")).emit("cuzdan-kasa-guncellendi", { kullaniciId: Number(req.body?.kullaniciId) });
   return { yukleme };
 }));
@@ -1141,6 +1199,7 @@ app.put("/api/admin/tema", admin, guvenli(async (req) => {
 }));
 app.post(
   "/api/admin/logo",
+  dosyaYuklemeLimiti,
   admin,
   express.raw({ type: ["image/png", "image/jpeg", "image/webp", "image/svg+xml"], limit: "2mb" }),
   guvenli(async (req) => {
@@ -1203,12 +1262,13 @@ app.delete("/api/admin/urunler/:id", admin, guvenli(async (req) => {
   await revizyonKaydet(t, { yapan: req.kullanici, varlikTuru: "urun", varlikId: req.params.id, islem: "arsivleme", aciklama: `${eski?.ad || "Ürün"} katalogdan arşivlendi.`, eskiDeger: eski });
   io.to(oda(t, "genel")).emit("urunler-guncellendi", await urunleriGetir(t));
 }));
-app.post("/api/admin/gorseller", admin, express.raw({ type: "image/*", limit: "5mb" }), guvenli(async (req) => {
-  const gorsel = await gorselYukle(req.body);
+app.post("/api/admin/gorseller", dosyaYuklemeLimiti, admin, express.raw({ type: "image/*", limit: "5mb" }), guvenli(async (req) => {
+  const gorsel = await gorselYukle(req.body, req.headers["content-type"]);
   return { gorsel };
 }));
 app.post(
   "/api/admin/gider-belgesi",
+  dosyaYuklemeLimiti,
   admin,
   express.raw({ type: ["image/png", "image/jpeg", "image/webp"], limit: "5mb" }),
   guvenli(async (req) => ({ belgeUrl: await giderBelgesiYukle(req.body, req.isletme.id, req.headers["content-type"]) }))
@@ -1533,6 +1593,27 @@ io.use(async (socket, sonraki) => {
 io.on("connection", (socket) => {
   console.log("Baglandi:", socket.id);
   socket.join(oda(socket.data.isletmeId, "genel"));
+  if (socket.kullanici?.id) {
+    socket.join(oda(socket.data.isletmeId, `kullanici-${socket.kullanici.id}`));
+  }
+
+  // HTTP limitleri Socket.IO paketlerini kapsamaz. Her bağlantı için ayrı
+  // kayan pencere, event yağmurunun CPU ve veritabanını tüketmesini önler.
+  let pencereBaslangici = Date.now();
+  let olaySayisi = 0;
+  socket.use((_paket, sonraki) => {
+    const simdi = Date.now();
+    if (simdi - pencereBaslangici >= 60_000) {
+      pencereBaslangici = simdi;
+      olaySayisi = 0;
+    }
+    olaySayisi += 1;
+    if (olaySayisi > 120) return sonraki(new Error("Socket istek sınırı aşıldı."));
+    sonraki();
+  });
+  socket.on("error", (hata) => {
+    if (hata?.message === "Socket istek sınırı aşıldı.") socket.disconnect(true);
+  });
 
   socket.on("masaya-katil", async (gelen, tamamlandi) => {
     const tenantId = socket.data.isletmeId;
@@ -1569,7 +1650,7 @@ io.on("connection", (socket) => {
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
     }).catch((e) => {
       console.error("Ürün ekleme hatası:", e.message);
-      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: e.message });
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: istemciHataMesaji(e) });
     });
   });
 
@@ -1617,7 +1698,7 @@ io.on("connection", (socket) => {
       if (typeof tamamlandi === "function") tamamlandi({ basarili: true });
     }).catch((e) => {
       console.error("Durum değiştirme hatası:", e.message);
-      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: e.message });
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: istemciHataMesaji(e) });
     });
   });
 
@@ -1644,7 +1725,7 @@ io.on("connection", (socket) => {
       console.log(`Masa ${masaNo} kapatildi`);
     }).catch((e) => {
       console.error("Masa kapatma hatası:", e.message);
-      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: e.message });
+      if (typeof tamamlandi === "function") tamamlandi({ basarili: false, hata: istemciHataMesaji(e) });
     });
   });
 

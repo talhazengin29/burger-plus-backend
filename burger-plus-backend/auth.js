@@ -22,6 +22,9 @@ import {
   ikiFaktorEtkinlestir,
   ikiFaktorKapat,
   ikiFaktorKurtarmaKoduKullan,
+  basarisizGirisiKaydet,
+  basariliGirisiKaydet,
+  kullaniciSifreHashiniGuclendir,
 } from "./db.js";
 import { sifirlamaEpostasiGonder } from "./eposta.js";
 import {
@@ -31,7 +34,7 @@ import {
 } from "./ikiFaktor.js";
 import {
   superAdminEmailIleGetir, superAdminIdIleGetir, superAdminIkiFaktorSirriKaydet,
-  superAdminGirisiniKaydet, superAdminDonustur,
+  superAdminGirisiniKaydet, superAdminBasarisizGirisiKaydet, superAdminDonustur,
 } from "./superAdminDb.js";
 
 // JWT gizli anahtari. Gercek uretimde .env'den gelmeli ve gizli olmali.
@@ -44,9 +47,23 @@ if (JWT_SECRET.length < 32) {
 if (!URETIM && !process.env.JWT_SECRET) {
   console.warn("UYARI: Yerel JWT_SECRET kullaniliyor; canli ortamda guclu bir JWT_SECRET tanimlayin.");
 }
-const TOKEN_SURESI = "7d"; // token 7 gun gecerli
-const SUPER_ADMIN_TOKEN_SURESI = "24h";
+const TOKEN_SURESI = String(process.env.JWT_ACCESS_TTL || "24h");
+const SUPER_ADMIN_TOKEN_SURESI = String(process.env.SUPER_ADMIN_JWT_TTL || "8h");
 const GECERSIZ_SUPER_ADMIN_HASH = "$2b$12$7nAOjall2JqSd9pzkW56TuM2l80iSQxxj1E.blcyle8ZFkGtHhwVm";
+const BCRYPT_MALIYETI = 12;
+const JWT_ORTAK = { algorithm: "HS256", issuer: "menule-api", audience: "menule-web" };
+
+function jwtImzala(veri, expiresIn) {
+  return jwt.sign(veri, JWT_SECRET, { ...JWT_ORTAK, expiresIn });
+}
+
+function jwtCoz(token) {
+  return jwt.verify(token, JWT_SECRET, {
+    algorithms: [JWT_ORTAK.algorithm],
+    issuer: JWT_ORTAK.issuer,
+    audience: JWT_ORTAK.audience,
+  });
+}
 const MASA_TOKEN_SECRET = String(process.env.MASA_TOKEN_SECRET || JWT_SECRET);
 if (MASA_TOKEN_SECRET.length < 32) {
   throw new Error("MASA_TOKEN_SECRET en az 32 karakter olmali.");
@@ -133,8 +150,7 @@ export async function kayitOl(isletmeId, veri) {
   const davetEden = davetKodu ? await davetKoduylaKullaniciBul(tenantId, davetKodu) : null;
   if (davetKodu && !davetEden) return { hata: "Davet kodu bulunamadı." };
 
-  // Sifreyi hash'le (10 tur salt — senior standart)
-  const sifreHash = await bcrypt.hash(sifre, 10);
+  const sifreHash = await bcrypt.hash(sifre, BCRYPT_MALIYETI);
 
   let kullanici;
   try {
@@ -161,12 +177,25 @@ export async function girisYap(isletmeId, { email, sifre } = {}) {
 
   const kullanici = await kullaniciBulEmail(tenantId, email);
   if (!kullanici) {
+    await bcrypt.compare(sifre, GECERSIZ_SUPER_ADMIN_HASH);
     return { hata: "E-posta veya şifre hatalı." };
   }
 
+  const kilitli = kullanici.giris_kilit_bitis && new Date(kullanici.giris_kilit_bitis).getTime() > Date.now();
   const dogruMu = await bcrypt.compare(sifre, kullanici.sifre_hash);
   if (!dogruMu || kullanici.rol === "pasif") {
+    // Kilitliyken gelen denemeler kilit süresini uzatmaz; aksi halde üçüncü
+    // taraf hesabı sürekli kilitli tutarak hizmet engelleme yapabilirdi.
+    if (kullanici.rol !== "pasif" && !kilitli) await basarisizGirisiKaydet(tenantId, kullanici.id);
     return { hata: "E-posta veya şifre hatalı." };
+  }
+  if (kilitli) {
+    return { hata: "Çok fazla başarısız giriş denemesi yapıldı. 15 dakika sonra tekrar deneyin." };
+  }
+  await basariliGirisiKaydet(tenantId, kullanici.id);
+  if (bcrypt.getRounds(kullanici.sifre_hash) < BCRYPT_MALIYETI) {
+    const gucluHash = await bcrypt.hash(sifre, BCRYPT_MALIYETI);
+    await kullaniciSifreHashiniGuclendir(tenantId, kullanici.id, kullanici.sifre_hash, gucluHash);
   }
 
   // İşletme kurulumunda veya kimlik sıfırlamasında admin hesabına geçici bir
@@ -176,19 +205,17 @@ export async function girisYap(isletmeId, { email, sifre } = {}) {
     // tip:"kullanici" DEĞİL — tokenDogrula (korumaliMiddleware) yalnızca
     // tip alanı boş veya "kullanici" olan token'ları geçerli sayar; bu farklı
     // tip sayesinde şifre belirlenmeden bu token'la korumalı hiçbir uca girilemez.
-    const gecisToken = jwt.sign(
+    const gecisToken = jwtImzala(
       { id: kullanici.id, isletmeId: tenantId, tip: "sifre-belirleme", amac: "sifre-belirleme" },
-      JWT_SECRET,
-      { expiresIn: "15m" }
+      "15m"
     );
     return { sifreDegisimGerekli: true, gecisToken };
   }
 
   if (kullanici.iki_faktor_aktif) {
-    const ikiFaktorToken = jwt.sign(
+    const ikiFaktorToken = jwtImzala(
       { id: kullanici.id, isletmeId: tenantId, amac: "iki-faktor-giris" },
-      JWT_SECRET,
-      { expiresIn: "5m" }
+      "5m"
     );
     return { ikiFaktorGerekli: true, ikiFaktorToken };
   }
@@ -238,7 +265,7 @@ export async function ikiFaktorGirisiniTamamla(isletmeId, ikiFaktorToken, kod) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   let cozulmus;
   try {
-    cozulmus = jwt.verify(String(ikiFaktorToken || ""), JWT_SECRET);
+    cozulmus = jwtCoz(String(ikiFaktorToken || ""));
   } catch {
     return { hata: "İki adımlı doğrulama oturumunun süresi doldu. Yeniden giriş yapın." };
   }
@@ -261,7 +288,7 @@ export async function ilkGirisSifreBelirle(isletmeId, gecisToken, yeniSifre) {
   const tenantId = isletmeIdZorunlu(isletmeId);
   let cozulmus;
   try {
-    cozulmus = jwt.verify(String(gecisToken || ""), JWT_SECRET);
+    cozulmus = jwtCoz(String(gecisToken || ""));
   } catch {
     return { hata: "Oturum süresi doldu. Lütfen tekrar giriş yapın." };
   }
@@ -272,7 +299,7 @@ export async function ilkGirisSifreBelirle(isletmeId, gecisToken, yeniSifre) {
   if (sifre.length < 8 || sifre.length > 72) {
     return { hata: "Yeni şifre 8-72 karakter olmalıdır." };
   }
-  const sifreHash = await bcrypt.hash(sifre, 10);
+  const sifreHash = await bcrypt.hash(sifre, BCRYPT_MALIYETI);
   const guncellendi = await ilkGirisSifresiniGuncelle(tenantId, cozulmus.id, sifreHash);
   if (!guncellendi) return { hata: "Şifre güncellenemedi. Lütfen tekrar giriş yapın." };
   const kullanici = await kullaniciBulId(tenantId, cozulmus.id);
@@ -320,13 +347,13 @@ export async function ikiFaktorDevreDisiBirak(isletmeId, kullaniciId, mevcutSifr
 // --- Token uret / dogrula ---
 function tokenUret(kullaniciId, isletmeId) {
   const tenantId = isletmeIdZorunlu(isletmeId);
-  return jwt.sign({ id: kullaniciId, isletmeId: tenantId, tip: "kullanici" }, JWT_SECRET, { expiresIn: TOKEN_SURESI });
+  return jwtImzala({ id: kullaniciId, isletmeId: tenantId, tip: "kullanici" }, TOKEN_SURESI);
 }
 
 // Token'i dogrular, gecerliyse guncel kullanici bilgisini dondurur.
 export async function tokenDogrula(token, beklenenIsletmeId = null) {
   try {
-    const cozulmus = jwt.verify(token, JWT_SECRET);
+    const cozulmus = jwtCoz(token);
     if (cozulmus.tip && cozulmus.tip !== "kullanici") return null;
     if (!cozulmus.id) return null;
     const tenantId = isletmeIdZorunlu(cozulmus.isletmeId);
@@ -345,7 +372,7 @@ export async function tokenDogrula(token, beklenenIsletmeId = null) {
 
 function istekTokeniniCoz(token) {
   try {
-    return jwt.verify(token, JWT_SECRET);
+    return jwtCoz(token);
   } catch {
     return null;
   }
@@ -463,7 +490,10 @@ export async function superAdminGiris(email, sifre) {
   const temizEmail = String(email || "").trim().toLowerCase().slice(0, 254);
   const kayit = await superAdminEmailIleGetir(temizEmail);
   const sifreDogru = await bcrypt.compare(String(sifre || ""), kayit?.sifre_hash || GECERSIZ_SUPER_ADMIN_HASH);
+  const hesapKilitli = kayit?.giris_kilit_bitis && new Date(kayit.giris_kilit_bitis).getTime() > Date.now();
+  if (hesapKilitli) return { hata: "Cok fazla basarisiz deneme yapildi. 15 dakika sonra tekrar deneyin." };
   if (!kayit?.aktif || !sifreDogru) {
+    if (kayit?.aktif) await superAdminBasarisizGirisiKaydet(kayit.id);
     return { hata: "E-posta veya şifre hatalı." };
   }
 
@@ -477,10 +507,9 @@ export async function superAdminGiris(email, sifre) {
   }
   if (!secret && !kayit.iki_faktor_aktif) return { hata: "İki faktör kurulumu tamamlanamadı." };
 
-  const ikiFaktorToken = jwt.sign(
+  const ikiFaktorToken = jwtImzala(
     { superAdminId: kayit.id, tip: "super-admin-2fa", amac: "super-admin-iki-faktor" },
-    JWT_SECRET,
-    { expiresIn: "5m" }
+    "5m"
   );
   return {
     ikiFaktorGerekli: true,
@@ -493,7 +522,7 @@ export async function superAdminGiris(email, sifre) {
 export async function superAdminIkiFaktorGirisiniTamamla(ikiFaktorToken, kod) {
   let cozulmus;
   try {
-    cozulmus = jwt.verify(String(ikiFaktorToken || ""), JWT_SECRET);
+    cozulmus = jwtCoz(String(ikiFaktorToken || ""));
   } catch {
     return { hata: "İki faktör oturumunun süresi doldu. Yeniden giriş yapın." };
   }
@@ -510,7 +539,7 @@ export async function superAdminIkiFaktorGirisiniTamamla(ikiFaktorToken, kod) {
   }
   if (!gecerli) return { hata: "Doğrulama kodu geçersiz." };
   const superAdmin = await superAdminGirisiniKaydet(kayit.id, kayit.iki_faktor_aktif !== true);
-  const token = jwt.sign({ superAdminId: kayit.id, tip: "super-admin" }, JWT_SECRET, { expiresIn: SUPER_ADMIN_TOKEN_SURESI });
+  const token = jwtImzala({ superAdminId: kayit.id, tip: "super-admin" }, SUPER_ADMIN_TOKEN_SURESI);
   return { superAdmin, token };
 }
 
@@ -533,10 +562,10 @@ export function superAdminMiddleware() {
 
 export function superAdminErisimTokeniUret(superAdminId, isletme) {
   const tenantId = isletmeIdZorunlu(isletme?.id);
-  return jwt.sign({
+  return jwtImzala({
     tip: "impersonation", isletmeId: tenantId, isletmeSlug: isletme.slug,
     impersonatedBy: Number(superAdminId), rol: "admin",
-  }, JWT_SECRET, { expiresIn: "30m" });
+  }, "30m");
 }
 
 export async function impersonationTokeniniDogrula(token, beklenenIsletmeId = null) {
@@ -569,7 +598,7 @@ export async function sifirlamaTalepEt(isletmeId, isletmeSlug, email) {
     await sifreSifirlamaTalebiOlustur(tenantId, kullanici.id, tokenHashla(duzToken), SIFIRLAMA_SURESI_DK);
     const frontendUrl = String(process.env.FRONTEND_URL || "").trim().replace(/\/$/, "");
     const slug = encodeURIComponent(String(isletmeSlug || "").trim().toLowerCase());
-    const link = `${frontendUrl}/${slug}/sifre-sifirla?token=${duzToken}`;
+    const link = `${frontendUrl}/${slug}/sifre-sifirla#token=${duzToken}`;
     await sifirlamaEpostasiGonder(kullanici.email, kullanici.ad, link);
   } catch (e) {
     // Saglayici/e-posta hatasi disariya sizdirilmaz, yalnizca sunucu loguna yazilir.
@@ -593,7 +622,7 @@ export async function sifreyiSifirla(isletmeId, token, yeniSifre) {
   if (sifre.length > 72) return { hata: "Şifre en fazla 72 karakter olabilir." };
   if (/[\r\n\t]/.test(sifre)) return { hata: "Şifre satır sonu veya sekme içeremez." };
 
-  const sifreHash = await bcrypt.hash(sifre, 10);
+  const sifreHash = await bcrypt.hash(sifre, BCRYPT_MALIYETI);
   const sonuc = await sifreyiSifirlaDb(tenantId, tokenHashla(temizToken), sifreHash);
   if (sonuc.gecersiz) return { hata: "Bağlantı geçersiz veya süresi dolmuş." };
   return { basarili: true };

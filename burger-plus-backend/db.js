@@ -135,12 +135,13 @@ export async function tablolariHazirla(isletmeId) {
   // açıkken girisYap normal oturum yerine "önce yeni şifre belirle" akışına
   // yönlendirir (bkz. auth.js#girisYap / ilkGirisSifreBelirle).
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS sifre_degistirmeli BOOLEAN NOT NULL DEFAULT false");
-  // sifre_degistirmeli açıkken atanan şifrenin düz metni: kurulumu/hesabı
-  // yöneten kişi (super admin ya da işletme admini) tek seferlik gösterimi
-  // kaçırırsa tekrar görebilsin diye. Hesap sahibi kendi şifresini
-  // belirlediği an (ilkGirisSifresiniGuncelle) NULL'a döner ve bir daha
-  // hiçbir yerde saklanmaz — yalnızca geçici/atanmış şifreler için geçerlidir.
-  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS sifre_gecici_metin TEXT");
+  // Parolalar geçici dahi olsa hiçbir zaman düz metin tutulmaz. Eski
+  // sürümlerin oluşturduğu alan ve içindeki hassas veri migration sırasında
+  // kalıcı olarak kaldırılır.
+  await pool.query("ALTER TABLE kullanicilar DROP COLUMN IF EXISTS sifre_gecici_metin");
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS basarisiz_giris_sayisi INTEGER NOT NULL DEFAULT 0");
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS son_basarisiz_giris TIMESTAMPTZ");
+  await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS giris_kilit_bitis TIMESTAMPTZ");
   // İsteğe bağlı TOTP tabanlı iki adımlı doğrulama. TOTP sırları uygulama
   // katmanında AES-GCM ile şifrelenmiş olarak saklanır; kurtarma kodları hash'tir.
   await pool.query("ALTER TABLE kullanicilar ADD COLUMN IF NOT EXISTS iki_faktor_aktif BOOLEAN NOT NULL DEFAULT false");
@@ -1376,6 +1377,50 @@ export async function kullaniciBulEmail(isletmeId, email) {
   return sonuc.rows[0] || null;
 }
 
+// Beş hatalı parola denemesinde hesabı 15 dakika kilitler. Sayaç, son
+// denemeden 15 dakika geçtiyse yeniden başlar; işlem tek atomik sorgudur.
+export async function basarisizGirisiKaydet(isletmeId, kullaniciId) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  const sonuc = await pool.query(
+    `UPDATE kullanicilar
+        SET basarisiz_giris_sayisi = CASE
+              WHEN son_basarisiz_giris IS NULL OR son_basarisiz_giris < NOW() - INTERVAL '15 minutes' THEN 1
+              ELSE basarisiz_giris_sayisi + 1
+            END,
+            son_basarisiz_giris = NOW(),
+            giris_kilit_bitis = CASE
+              WHEN (CASE
+                WHEN son_basarisiz_giris IS NULL OR son_basarisiz_giris < NOW() - INTERVAL '15 minutes' THEN 1
+                ELSE basarisiz_giris_sayisi + 1
+              END) >= 5 THEN NOW() + INTERVAL '15 minutes'
+              ELSE giris_kilit_bitis
+            END
+      WHERE isletme_id=$1 AND id=$2
+      RETURNING basarisiz_giris_sayisi,giris_kilit_bitis`,
+    [tenantId, kullaniciId]
+  );
+  return sonuc.rows[0] || null;
+}
+
+export async function basariliGirisiKaydet(isletmeId, kullaniciId) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  await pool.query(
+    `UPDATE kullanicilar
+        SET basarisiz_giris_sayisi=0,son_basarisiz_giris=NULL,giris_kilit_bitis=NULL
+      WHERE isletme_id=$1 AND id=$2`,
+    [tenantId, kullaniciId]
+  );
+}
+
+export async function kullaniciSifreHashiniGuclendir(isletmeId, kullaniciId, eskiHash, yeniHash) {
+  const tenantId = isletmeIdZorunlu(isletmeId);
+  await pool.query(
+    `UPDATE kullanicilar SET sifre_hash=$1
+      WHERE isletme_id=$2 AND id=$3 AND sifre_hash=$4`,
+    [yeniHash, tenantId, kullaniciId, eskiHash]
+  );
+}
+
 // Tek panelden giris: isletme bilinmeden, TUM isletmelerde e-postayla adaylari
 // bulur (ayni e-posta farkli isletmelerde ayri hesap olabilir, bkz. isletmeDb.js
 // isletme_id+email unique index yorumu). Yalnizca aktif isletmeler dahil edilir.
@@ -1516,7 +1561,8 @@ export async function ilkGirisSifresiniGuncelle(isletmeId, kullaniciId, yeniSifr
   const tenantId = isletmeIdZorunlu(isletmeId);
   const sonuc = await pool.query(
     `UPDATE kullanicilar
-        SET sifre_hash=$1, sifre_degistirmeli=false, sifre_gecici_metin=NULL, sifre_degisim_tarihi=NOW()
+        SET sifre_hash=$1, sifre_degistirmeli=false, sifre_degisim_tarihi=NOW(),
+            basarisiz_giris_sayisi=0,son_basarisiz_giris=NULL,giris_kilit_bitis=NULL
       WHERE isletme_id=$2 AND id=$3 AND sifre_degistirmeli=true RETURNING id`,
     [yeniSifreHash, tenantId, kullaniciId]
   );
@@ -1549,7 +1595,8 @@ export async function sifreyiSifirla(isletmeId, tokenHash, yeniSifreHash) {
       // sonraki girişte gereksiz yere "yeni şifre belirle" ekranına düşer ve
       // artık geçersiz olan eski geçici şifre yönetim panelinde görünmeye devam eder.
       `UPDATE kullanicilar
-          SET sifre_hash=$1, sifre_degisim_tarihi=NOW(), sifre_degistirmeli=false, sifre_gecici_metin=NULL
+          SET sifre_hash=$1, sifre_degisim_tarihi=NOW(), sifre_degistirmeli=false,
+              basarisiz_giris_sayisi=0,son_basarisiz_giris=NULL,giris_kilit_bitis=NULL
         WHERE isletme_id=$2 AND id=$3`,
       [yeniSifreHash, tenantId, kullaniciId]
     );

@@ -78,6 +78,10 @@ export async function superAdminTablolariniHazirla() {
       olusturma TIMESTAMPTZ DEFAULT NOW()
     );
 
+    ALTER TABLE super_adminler ADD COLUMN IF NOT EXISTS basarisiz_giris_sayisi INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE super_adminler ADD COLUMN IF NOT EXISTS son_basarisiz_giris TIMESTAMPTZ;
+    ALTER TABLE super_adminler ADD COLUMN IF NOT EXISTS giris_kilit_bitis TIMESTAMPTZ;
+
     CREATE TABLE IF NOT EXISTS abonelikler (
       id SERIAL PRIMARY KEY,
       isletme_id INTEGER NOT NULL REFERENCES isletmeler(id) ON DELETE CASCADE,
@@ -152,11 +156,34 @@ export async function superAdminIkiFaktorSirriKaydet(id, sifreliSir) {
 
 export async function superAdminGirisiniKaydet(id, ikiFaktorEtkinlestir = false) {
   const sonuc = await pool.query(
-    `UPDATE super_adminler SET son_giris=NOW(),iki_faktor_aktif=CASE WHEN $2 THEN true ELSE iki_faktor_aktif END
+    `UPDATE super_adminler
+     SET son_giris=NOW(),iki_faktor_aktif=CASE WHEN $2 THEN true ELSE iki_faktor_aktif END,
+         basarisiz_giris_sayisi=0,son_basarisiz_giris=NULL,giris_kilit_bitis=NULL
      WHERE id=$1 AND aktif=true RETURNING *`,
     [idDogrula(id, "superAdminId"), ikiFaktorEtkinlestir === true]
   );
   return superAdminDonustur(sonuc.rows[0]);
+}
+
+export async function superAdminBasarisizGirisiKaydet(id) {
+  const sonuc = await pool.query(
+    `UPDATE super_adminler
+     SET basarisiz_giris_sayisi = CASE
+           WHEN son_basarisiz_giris IS NULL OR son_basarisiz_giris < NOW() - INTERVAL '15 minutes' THEN 1
+           ELSE basarisiz_giris_sayisi + 1
+         END,
+         son_basarisiz_giris=NOW(),
+         giris_kilit_bitis = CASE
+           WHEN (CASE WHEN son_basarisiz_giris IS NULL OR son_basarisiz_giris < NOW() - INTERVAL '15 minutes'
+                      THEN 1 ELSE basarisiz_giris_sayisi + 1 END) >= 5
+           THEN NOW() + INTERVAL '15 minutes'
+           ELSE giris_kilit_bitis
+         END
+     WHERE id=$1 AND aktif=true
+     RETURNING basarisiz_giris_sayisi,giris_kilit_bitis`,
+    [idDogrula(id, "superAdminId")]
+  );
+  return sonuc.rows[0] || null;
 }
 
 export async function superAdminKaydiEkle(superAdminId, { islem, hedefIsletmeId = null, detay = {}, ip = "" } = {}) {
@@ -243,14 +270,13 @@ function adminDonustur(satir) {
     olusturma: satir.olusturma,
     sifreDegisimTarihi: satir.sifre_degisim_tarihi,
     sifreDegistirmeli: satir.sifre_degistirmeli === true,
-    sifreGeciciMetin: satir.sifre_degistirmeli === true ? satir.sifre_gecici_metin : null,
   };
 }
 
 export async function isletmeAdminleriniGetir(isletmeId, veritabani = pool) {
   const id = idDogrula(isletmeId, "isletmeId");
   const sonuc = await veritabani.query(
-    `SELECT id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi,sifre_degistirmeli,sifre_gecici_metin
+    `SELECT id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi,sifre_degistirmeli
        FROM kullanicilar
       WHERE isletme_id=$1 AND rol='admin'
       ORDER BY id`,
@@ -295,16 +321,16 @@ export async function isletmeAdminHesabiniAyarla(isletmeId, veri = {}) {
       await baglanti.query(
         `UPDATE kullanicilar
             SET ad=$2, soyad=$3, sifre_hash=$4, rol='admin', sifre_degisim_tarihi=NOW(),
-                sifre_degistirmeli=true, sifre_gecici_metin=$5
+                sifre_degistirmeli=true
           WHERE id=$1`,
-        [kullaniciId, ad, soyad, sifreHash, sifre]
+        [kullaniciId, ad, soyad, sifreHash]
       );
     } else {
       olusturuldu = true;
       const eklenen = await baglanti.query(
-        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli,sifre_gecici_metin)
-         VALUES ($1,$2,$3,$4,$5,'admin',$6,true,$7) RETURNING id`,
-        [id, ad, soyad, email, sifreHash, davetKoduUret(), sifre]
+        `INSERT INTO kullanicilar (isletme_id,ad,soyad,email,sifre_hash,rol,davet_kodu,sifre_degistirmeli)
+         VALUES ($1,$2,$3,$4,$5,'admin',$6,true) RETURNING id`,
+        [id, ad, soyad, email, sifreHash, davetKoduUret()]
       );
       kullaniciId = Number(eklenen.rows[0].id);
     }
@@ -350,11 +376,10 @@ export async function isletmeAdmininiGuncelle(isletmeId, adminId, veri = {}) {
           SET ad=$3, soyad=$4, email=$5,
               sifre_hash=CASE WHEN $6::text IS NULL THEN sifre_hash ELSE $6 END,
               sifre_degistirmeli=CASE WHEN $6::text IS NULL THEN sifre_degistirmeli ELSE true END,
-              sifre_gecici_metin=CASE WHEN $6::text IS NULL THEN sifre_gecici_metin ELSE $7 END,
               sifre_degisim_tarihi=NOW()
         WHERE isletme_id=$1 AND id=$2 AND rol='admin'
-        RETURNING id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi,sifre_degistirmeli,sifre_gecici_metin`,
-      [id, yoneticiId, ad, soyad, email, sifreHash, sifre || null]
+        RETURNING id,ad,soyad,email,iki_faktor_aktif,olusturma,sifre_degisim_tarihi,sifre_degistirmeli`,
+      [id, yoneticiId, ad, soyad, email, sifreHash]
     );
     if (!sonuc.rows.length) throw new Error("İşletme yöneticisi bulunamadı.");
     return { admin: adminDonustur(sonuc.rows[0]), sifreYenilendi: Boolean(sifre) };
@@ -370,7 +395,7 @@ export async function isletmeAdmininiSil(isletmeId, adminId) {
   const sonuc = await pool.query(
     `UPDATE kullanicilar
         SET rol='pasif', sifre_degisim_tarihi=NOW(), sifre_degistirmeli=false,
-            sifre_gecici_metin=NULL, iki_faktor_aktif=false, iki_faktor_sir=NULL,
+            iki_faktor_aktif=false, iki_faktor_sir=NULL,
             iki_faktor_bekleyen_sir=NULL, iki_faktor_kurtarma='[]'::jsonb
       WHERE isletme_id=$1 AND id=$2 AND rol='admin'
       RETURNING id,email`,

@@ -20,7 +20,9 @@ const SVG_TURU = {
   },
 };
 const LOGO_TURLERI = [...GORSEL_TURLERI.filter((tur) => ["image/png", "image/jpeg", "image/webp"].includes(tur.mime)), SVG_TURU];
-const DESTEKLENEN_MIME_TURLERI = [...new Set([...GORSEL_TURLERI, SVG_TURU].map((tur) => tur.mime))];
+// Depoya yalnızca sunucuda yeniden kodlanan pasif WebP çıktıları yazılır.
+// Kaynak MIME türleri yükleme doğrulamasında kabul edilse de bucket'a ham gitmez.
+const DESTEKLENEN_MIME_TURLERI = ["image/webp"];
 
 function ayarlariGetir() {
   const supabaseUrl = String(process.env.SUPABASE_URL || "").trim().replace(/\/$/, "");
@@ -67,6 +69,18 @@ function dosyaTurunuBul(buffer, turler, bildirilenMime = "") {
   return tur;
 }
 
+export async function rasterGorseliGuvenliWebpYap(buffer, ad = "Görsel") {
+  try {
+    return await sharp(buffer, { limitInputPixels: 25_000_000, failOn: "error", animated: false })
+      .rotate()
+      .resize({ width: 2400, height: 2400, fit: "inside", withoutEnlargement: true })
+      .webp({ quality: 86, effort: 4 })
+      .toBuffer();
+  } catch {
+    throw new Error(`${ad} işlenemedi. Geçerli ve bozuk olmayan bir dosya yükleyin.`);
+  }
+}
+
 async function nesneYukle(buffer, nesneYolu, dosyaTuru, enFazlaBayt, boyutMesaji) {
   if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir görsel dosyası gönderilmelidir.");
   if (buffer.length > enFazlaBayt) throw new Error(boyutMesaji);
@@ -95,17 +109,20 @@ async function nesneYukle(buffer, nesneYolu, dosyaTuru, enFazlaBayt, boyutMesaji
   return `${ayarlar.supabaseUrl}/storage/v1/object/public/${ayarlar.bucket}/${nesneYolu}`;
 }
 
-export async function gorselYukle(buffer) {
+export async function gorselYukle(buffer, bildirilenMime = "") {
   if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir görsel dosyası gönderilmelidir.");
-  const gorselTuru = dosyaTurunuBul(buffer, GORSEL_TURLERI);
+  if (buffer.length > 5 * 1024 * 1024) throw new Error("Görsel en fazla 5 MB olabilir.");
+  const gorselTuru = dosyaTurunuBul(buffer, GORSEL_TURLERI, bildirilenMime);
   if (!gorselTuru) throw new Error("PNG, JPG/JPEG, WebP, GIF, AVIF veya BMP formatında geçerli bir görsel yükleyin.");
-  const nesneYolu = `urunler/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${gorselTuru.uzanti}`;
-  return nesneYukle(buffer, nesneYolu, gorselTuru, 5 * 1024 * 1024, "Görsel en fazla 5 MB olabilir.");
+  const guvenliGorsel = await rasterGorseliGuvenliWebpYap(buffer, "Görsel");
+  const nesneYolu = `urunler/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.webp`;
+  return nesneYukle(guvenliGorsel, nesneYolu, { mime: "image/webp" }, 5 * 1024 * 1024, "İşlenen görsel en fazla 5 MB olabilir.");
 }
 
 export async function sikayetGorseliYukle(buffer, isletmeId, kullaniciId, bildirilenMime) {
   if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir görsel dosyası gönderilmelidir.");
   const izinliTurler = GORSEL_TURLERI.filter((tur) => ["image/png", "image/jpeg", "image/webp"].includes(tur.mime));
+  if (buffer.length > 5 * 1024 * 1024) throw new Error("Şikayet görseli en fazla 5 MB olabilir.");
   const gorselTuru = dosyaTurunuBul(buffer, izinliTurler, bildirilenMime);
   if (!gorselTuru) throw new Error("Şikayet görseli PNG, JPG/JPEG veya WebP formatında olmalıdır.");
   const tenant = Number(isletmeId);
@@ -113,8 +130,9 @@ export async function sikayetGorseliYukle(buffer, isletmeId, kullaniciId, bildir
   if (!Number.isSafeInteger(tenant) || tenant < 1 || !Number.isSafeInteger(kullanici) || kullanici < 1) {
     throw new Error("Görsel sahibi doğrulanamadı.");
   }
-  const nesneYolu = `sikayetler/${tenant}/${kullanici}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${gorselTuru.uzanti}`;
-  return nesneYukle(buffer, nesneYolu, gorselTuru, 5 * 1024 * 1024, "Şikayet görseli en fazla 5 MB olabilir.");
+  const guvenliGorsel = await rasterGorseliGuvenliWebpYap(buffer, "Şikayet görseli");
+  const nesneYolu = `sikayetler/${tenant}/${kullanici}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.webp`;
+  return nesneYukle(guvenliGorsel, nesneYolu, { mime: "image/webp" }, 5 * 1024 * 1024, "İşlenen şikayet görseli en fazla 5 MB olabilir.");
 }
 
 export function sikayetGorseliKullaniciyaAitMi(publicUrl, isletmeId, kullaniciId) {
@@ -128,12 +146,14 @@ export function sikayetGorseliKullaniciyaAitMi(publicUrl, isletmeId, kullaniciId
 export async function giderBelgesiYukle(buffer, isletmeId, bildirilenMime) {
   if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir gider belgesi gönderilmelidir.");
   const izinliTurler = GORSEL_TURLERI.filter((tur) => ["image/png", "image/jpeg", "image/webp"].includes(tur.mime));
+  if (buffer.length > 5 * 1024 * 1024) throw new Error("Gider belgesi en fazla 5 MB olabilir.");
   const gorselTuru = dosyaTurunuBul(buffer, izinliTurler, bildirilenMime);
   if (!gorselTuru) throw new Error("Gider belgesi PNG, JPG/JPEG veya WebP formatında olmalıdır.");
   const tenant = Number(isletmeId);
   if (!Number.isSafeInteger(tenant) || tenant < 1) throw new Error("Belge işletmesi doğrulanamadı.");
-  const nesneYolu = `giderler/${tenant}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${gorselTuru.uzanti}`;
-  return nesneYukle(buffer, nesneYolu, gorselTuru, 5 * 1024 * 1024, "Gider belgesi en fazla 5 MB olabilir.");
+  const guvenliGorsel = await rasterGorseliGuvenliWebpYap(buffer, "Gider belgesi");
+  const nesneYolu = `giderler/${tenant}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.webp`;
+  return nesneYukle(guvenliGorsel, nesneYolu, { mime: "image/webp" }, 5 * 1024 * 1024, "İşlenen gider belgesi en fazla 5 MB olabilir.");
 }
 
 export function giderBelgesiIsletmeyeAitMi(publicUrl, isletmeId) {
