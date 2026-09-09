@@ -118,6 +118,15 @@ import {
   isletmeAdminleriniGetir, isletmeAdminHesabiniAyarla, isletmeAdmininiGuncelle, isletmeAdmininiSil,
 } from "./superAdminDb.js";
 import { sablonuGetir, slugOlustur } from "./sablonlar.js";
+import {
+  masaPlaniOlustur,
+  masaZekasiTablolariniHazirla,
+  masaZekasiOturumunuGetir,
+  masaZekasiOturumunaKatil,
+  masaZekasiTercihiniKaydet,
+  masaZekasiOrtakTercihleriniGetir,
+  masaZekasiOturumunuKapat,
+} from "./masaZekasi.js";
 import { isletmeKurulumunuYap, slugMusaitlikDurumu } from "./kurulumDb.js";
 import {
   personelCagriTablolariHazirla, masaCagriOturumuBaslat, masaPersonelCagrisiniGetir,
@@ -291,6 +300,10 @@ const personelCagriLimiti = rateLimit({
 const sikayetLimiti = rateLimit({
   windowMs: 15 * 60_000, limit: URETIM ? 60 : 180, standardHeaders: "draft-8", legacyHeaders: false,
   message: { hata: "Çok fazla geri bildirim isteği gönderildi. Lütfen kısa süre sonra tekrar deneyin." },
+});
+const masaZekasiLimiti = rateLimit({
+  windowMs: 10 * 60_000, limit: URETIM ? 90 : 300, standardHeaders: "draft-8", legacyHeaders: false,
+  message: { hata: "Çok fazla öneri istendi. Lütfen kısa süre sonra tekrar deneyin." },
 });
 const landingChatLimiti = rateLimit({
   windowMs: 5 * 60_000,
@@ -627,6 +640,61 @@ app.get("/api/mutfak", rolMiddleware(["mutfak", "salon", "kasiyer"]), async (req
 app.get("/api/urunler", async (req, res) => {
   await suresiDolanStokRezervasyonlariniBirak(req.isletme.id);
   res.json({ urunler: await urunleriGetir(req.isletme.id) });
+});
+app.post("/api/masa-zekasi/oner", masaZekasiLimiti, opsiyonelKullaniciMiddleware(), async (req, res) => {
+  try {
+    await suresiDolanStokRezervasyonlariniBirak(req.isletme.id);
+    const [urunler, kampanyalar, masalar] = await Promise.all([
+      urunleriGetir(req.isletme.id),
+      kampanyalariGetir(req.isletme.id),
+      tumAcikMasalar(req.isletme.id),
+    ]);
+    res.json(masaPlaniOlustur({
+      urunler,
+      kampanyalar,
+      masalar,
+      tercihler: req.body || {},
+      uye: Boolean(req.kullanici),
+    }));
+  } catch (e) {
+    res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Sipariş planı oluşturulamadı.") });
+  }
+});
+function masaZekasiErisiminiDogrula(req, res) {
+  const masaNo = guvenliMasaNo(req.params.masaNo);
+  if (!masaNo) { res.status(400).json({ hata: "Masa numarası geçersiz." }); return null; }
+  if (!masaErisimTokeniniDogrula(req.headers["x-masa-token"], req.isletme.id, masaNo)) {
+    res.status(403).json({ hata: "Masa QR erişimi geçersiz." }); return null;
+  }
+  return masaNo;
+}
+app.post("/api/masa/:masaNo/zeka-oturumu/katil", masaZekasiLimiti, async (req, res) => {
+  try {
+    const masaNo = masaZekasiErisiminiDogrula(req, res); if (!masaNo) return;
+    const oturum = await masaZekasiOturumunaKatil(req.isletme.id, pool, masaNo, req.body?.cihazAnahtari, req.body?.ad);
+    io.to(oda(req.isletme.id, `masa-${masaNo}`)).emit("masa-zekasi-guncellendi", await masaZekasiOturumunuGetir(req.isletme.id, pool, masaNo));
+    res.status(201).json({ oturum });
+  } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Ortak masa oturumuna katılınamadı.") }); }
+});
+app.put("/api/masa/:masaNo/zeka-oturumu/tercihim", masaZekasiLimiti, async (req, res) => {
+  try {
+    const masaNo = masaZekasiErisiminiDogrula(req, res); if (!masaNo) return;
+    const oturum = await masaZekasiTercihiniKaydet(req.isletme.id, pool, masaNo, req.body?.cihazAnahtari, req.body?.tercihler);
+    io.to(oda(req.isletme.id, `masa-${masaNo}`)).emit("masa-zekasi-guncellendi", await masaZekasiOturumunuGetir(req.isletme.id, pool, masaNo));
+    res.json({ oturum });
+  } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Tercihler kaydedilemedi.") }); }
+});
+app.post("/api/masa/:masaNo/zeka-oturumu/oner", masaZekasiLimiti, opsiyonelKullaniciMiddleware(), async (req, res) => {
+  try {
+    const masaNo = masaZekasiErisiminiDogrula(req, res); if (!masaNo) return;
+    await suresiDolanStokRezervasyonlariniBirak(req.isletme.id);
+    const [tercihler, urunler, kampanyalar, masalar, oturum] = await Promise.all([
+      masaZekasiOrtakTercihleriniGetir(req.isletme.id, pool, masaNo, req.body?.cihazAnahtari),
+      urunleriGetir(req.isletme.id), kampanyalariGetir(req.isletme.id), tumAcikMasalar(req.isletme.id),
+      masaZekasiOturumunuGetir(req.isletme.id, pool, masaNo, req.body?.cihazAnahtari),
+    ]);
+    res.json({ ...masaPlaniOlustur({ urunler, kampanyalar, masalar, tercihler, uye: Boolean(req.kullanici) }), oturum });
+  } catch (e) { res.status(e.status || 400).json({ hata: istemciHataMesaji(e, "Ortak sipariş planı oluşturulamadı.") }); }
 });
 app.get("/api/oneriler", async (req, res) => {
   const urunIdleri = String(req.query.urunler || "")
@@ -1713,6 +1781,7 @@ io.on("connection", (socket) => {
     masaSirayaAl(tenantId, masaNo, async () => {
       const bos = await masaKapat(tenantId, masaNo, socket.kullanici?.id);
       await masaCagriOturumlariniKapat(tenantId, pool, masaNo);
+      await masaZekasiOturumunuKapat(tenantId, pool, masaNo);
       io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-guncellendi", bos);
       io.to(oda(tenantId, `masa-${masaNo}`)).emit("masa-kapandi", { masaNo });
       const tumMasalar = await tumAcikMasalar(tenantId);
@@ -1795,6 +1864,7 @@ isletmeTablosunuHazirla()
   .then(() => degerlendirmeTablolariniHazirla(pool))
   .then(() => giderTablolariniHazirla(pool))
   .then(() => receteTablolariniHazirla(pool))
+  .then(() => masaZekasiTablolariniHazirla(pool))
   .then(() => isletmeMigrationunuCalistir())
   .then(() => superAdminTablolariniHazirla())
   .then(() => basvuruTablosunuHazirla(pool))
