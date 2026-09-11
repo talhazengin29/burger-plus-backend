@@ -9,121 +9,10 @@ function isletmeIdZorunlu(isletmeId) {
   return id;
 }
 
-const BASLANGIC_URUNLERI = [
-  [1,"Classic Burger",180,"Burgerler",200,"https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=400&h=400&fit=crop"],
-  [2,"BBQ Smoke Burger",220,"Burgerler",300,"https://images.unsplash.com/photo-1553979459-d2229ba7433b?w=400&h=400&fit=crop"],
-  [3,"Vegan Burger",195,"Burgerler",180,"https://images.unsplash.com/photo-1520072959219-c595dc870360?w=400&h=400&fit=crop"],
-  [4,"Double Cheese",250,"Burgerler",400,"https://images.unsplash.com/photo-1550547660-d9450f859349?w=400&h=400&fit=crop"],
-  [5,"Çıtır Patates",75,"Yan Lezzetler",400,"https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=400&h=400&fit=crop"],
-  [6,"Soğan Halkası",85,"Yan Lezzetler",200,"https://images.unsplash.com/photo-1639024471283-03518883512d?w=400&h=400&fit=crop"],
-  [7,"Kola",40,"İçecekler",330,"https://images.unsplash.com/photo-1554866585-cd94860890b7?w=400&h=400&fit=crop"],
-  [8,"Limonata",55,"İçecekler",400,"https://images.unsplash.com/photo-1621263764928-df1444c5e859?w=400&h=400&fit=crop"],
-  [9,"Ayran",35,"İçecekler",300,"https://images.unsplash.com/photo-1584568694244-14fbdf83bd30?w=400&h=400&fit=crop"],
-  [10,"Su",15,"İçecekler",500,"https://images.unsplash.com/photo-1616118132534-381148898bb4?w=400&h=400&fit=crop"],
-  [11,"Soda",30,"İçecekler",200,"https://images.unsplash.com/photo-1625772299848-391b6a87d7b3?w=400&h=400&fit=crop"],
-  [12,"Çay",20,"İçecekler",200,"https://images.unsplash.com/photo-1597481499750-3e6b22637e12?w=400&h=400&fit=crop"],
-  [13,"Trüflü Mushroom Burger",275,"Burgerler",220,"https://images.unsplash.com/photo-1550547660-d9450f859349?w=400&h=400&fit=crop"],
-  [14,"Acılı Mexican Burger",260,"Burgerler",200,"https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=400&h=400&fit=crop"],
-  [15,"Crispy Chicken Burger",220,"Burgerler",180,"https://images.unsplash.com/photo-1565299507177-b0ac66763828?w=400&h=400&fit=crop"],
-  [16,"BBQ Ranch Burger",285,"Burgerler",250,"https://images.unsplash.com/photo-1553979459-d2229ba7433b?w=400&h=400&fit=crop"],
-  [17,"Mozzarella Sticks",110,"Yan Lezzetler",180,"https://images.unsplash.com/photo-1531749668029-2db88e4276c7?w=400&h=400&fit=crop"],
-  [18,"Coleslaw Salata",70,"Yan Lezzetler",160,"https://images.unsplash.com/photo-1547592180-85f173990554?w=400&h=400&fit=crop"],
-  [19,"Şeftalili Ice Tea",50,"İçecekler",330,"https://images.unsplash.com/photo-1497534446932-c925b458314e?w=400&h=400&fit=crop"],
-  [20,"Çikolatalı Milkshake",95,"İçecekler",400,"https://images.unsplash.com/photo-1572490122747-3968b75cc699?w=400&h=400&fit=crop"],
-  [21,"Classic Menü",255,"Menüler",200,"https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=400&h=400&fit=crop"],
-  [22,"BBQ Smoke Menü",305,"Menüler",300,"https://images.unsplash.com/photo-1553979459-d2229ba7433b?w=400&h=400&fit=crop"],
-  [23,"Double Cheese Menü",340,"Menüler",400,"https://images.unsplash.com/photo-1550547660-d9450f859349?w=400&h=400&fit=crop"],
-  [24,"Vegan Menü",275,"Menüler",180,"https://images.unsplash.com/photo-1520072959219-c595dc870360?w=400&h=400&fit=crop"],
-  [25,"Crispy Chicken Menü",305,"Menüler",180,"https://images.unsplash.com/photo-1565299507177-b0ac66763828?w=400&h=400&fit=crop"],
-  [26,"Çocuk Menü",190,"Menüler",120,"https://images.unsplash.com/photo-1571091718767-18b5b1457add?w=400&h=400&fit=crop"],
-  [27,"Mantar Swiss Burger",265,"Burgerler",220,"https://images.unsplash.com/photo-1550547660-d9450f859349?w=400&h=400&fit=crop"],
-  [28,"Firehouse Burger",270,"Burgerler",250,"https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=400&h=400&fit=crop"],
-  [29,"Avokadolu Burger",255,"Burgerler",180,"https://images.unsplash.com/photo-1520072959219-c595dc870360?w=400&h=400&fit=crop"],
-  [30,"Smashed Burger",240,"Burgerler",200,"https://images.unsplash.com/photo-1550547660-d9450f859349?w=400&h=400&fit=crop"],
-  [31,"Cheddar Soslu Patates",95,"Yan Lezzetler",300,"https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=400&h=400&fit=crop"],
-  [32,"Baharatlı Patates",90,"Yan Lezzetler",300,"https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=400&h=400&fit=crop"],
-  [33,"Çıtır Tavuk Parçaları",135,"Yan Lezzetler",220,"https://images.unsplash.com/photo-1565299507177-b0ac66763828?w=400&h=400&fit=crop"],
-  [34,"Jalapeno Poppers",115,"Yan Lezzetler",180,"https://images.unsplash.com/photo-1531749668029-2db88e4276c7?w=400&h=400&fit=crop"],
-  [35,"Mac & Cheese Bites",120,"Yan Lezzetler",180,"https://images.unsplash.com/photo-1572449043416-55f4685c9bb7?w=400&h=400&fit=crop"],
-  [36,"Akdeniz Salata",100,"Yan Lezzetler",220,"https://images.unsplash.com/photo-1547592180-85f173990554?w=400&h=400&fit=crop"],
-  [37,"Zero Kola",40,"İçecekler",330,"https://images.unsplash.com/photo-1554866585-cd94860890b7?w=400&h=400&fit=crop"],
-  [38,"Fanta",40,"İçecekler",330,"https://images.unsplash.com/photo-1554866585-cd94860890b7?w=400&h=400&fit=crop"],
-  [39,"Sprite",40,"İçecekler",330,"https://images.unsplash.com/photo-1554866585-cd94860890b7?w=400&h=400&fit=crop"],
-  [40,"Soğuk Kahve",90,"İçecekler",300,"https://images.unsplash.com/photo-1461023058943-07fcbe16d735?w=400&h=400&fit=crop"],
-  [41,"Vanilyalı Milkshake",105,"İçecekler",400,"https://images.unsplash.com/photo-1572490122747-3968b75cc699?w=400&h=400&fit=crop"],
-  [42,"Taze Portakal Suyu",80,"İçecekler",300,"https://images.unsplash.com/photo-1621506289937-a8e4df240d0b?w=400&h=400&fit=crop"],
-];
-
-const BASLANGIC_KATEGORILERI = [
-  ["Menüler", "https://images.unsplash.com/photo-1513104890138-7c749659a591?w=160&h=160&fit=crop", 5],
-  ["Burgerler", "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=160&h=160&fit=crop", 10],
-  ["Yan Lezzetler", "https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=160&h=160&fit=crop", 20],
-  ["İçecekler", "https://images.unsplash.com/photo-1554866585-cd94860890b7?w=160&h=160&fit=crop", 30],
-];
-
-const BASLANGIC_KAMPANYALARI = [
-  ["happy-hour", "14:00 - 17:00", "Happy Hour", "14:00-17:00 arası tüm içeceklerde %30 indirim!", "Sipariş Ver", "primary", "https://images.unsplash.com/photo-1554866585-cd94860890b7?w=600&h=400&fit=crop", 14, 17, 30, ["İçecekler"], "saatli", 10],
-  ["ogrenci-menu", "Öğrenciye Özel", "Öğrenci Menüsü", "Tüm burgerlerde her zaman %15 indirim.", "Sipariş Ver", "primary", "https://images.unsplash.com/photo-1571091718767-18b5b1457add?w=600&h=400&fit=crop", null, null, 15, ["Burgerler"], "surekli", 20],
-  ["davet-et", "Davet Et", "Arkadaşını Getir", "Kodunla kayıt olan arkadaşının tamamlanan her alışverişinden %5 puan kazan.", "Davet Kodumu Göster", "charcoal", "https://images.unsplash.com/photo-1607013251379-e6eecfffe234?w=600&h=400&fit=crop", null, null, 0, [], "surekli", 30],
-];
-
-const BASLANGIC_MALZEMELERI = {
-  1: ["Dana köfte", "Cheddar", "Marul", "Domates", "Soğan", "Turşu", "Özel sos"],
-  2: ["Dana köfte", "Cheddar", "Çıtır soğan", "BBQ sos", "Marul", "Turşu"],
-  3: ["Bitkisel köfte", "Marul", "Domates", "Soğan", "Vegan sos"],
-  4: ["Dana köfte x2", "Cheddar x2", "Marul", "Domates", "Özel sos"],
-  5: ["Patates", "Ayçiçek yağı", "Tuz"],
-  6: ["Soğan", "Galeta unu", "Un", "Baharatlar"],
-  7: ["Kola"], 8: ["Limonata"], 9: ["Ayran"], 10: ["Su"], 11: ["Soda"], 12: ["Çay"],
-  13: ["Dana köfte", "Cheddar", "Mantar", "Trüf sos", "Marul"],
-  14: ["Dana köfte", "Cheddar", "Jalapeno", "Meksika sosu", "Marul"],
-  15: ["Çıtır tavuk", "Cheddar", "Coleslaw", "Ranch sos"],
-  16: ["Dana köfte", "Cheddar", "BBQ sos", "Ranch sos", "Çıtır soğan"],
-  17: ["Mozzarella", "Galeta unu", "Marinara sos"],
-  18: ["Lahana", "Havuç", "Yoğurtlu sos"],
-  19: ["Çay", "Şeftali", "Su"],
-  20: ["Süt", "Çikolata", "Dondurma"],
-  21: ["Classic Burger", "Çıtır Patates", "Kola"], 22: ["BBQ Smoke Burger", "Çıtır Patates", "Kola"],
-  23: ["Double Cheese", "Çıtır Patates", "İçecek"], 24: ["Vegan Burger", "Patates", "Limonata"],
-  25: ["Crispy Chicken Burger", "Patates", "İçecek"], 26: ["Mini Burger", "Patates", "Meyve suyu"],
-  27: ["Dana köfte", "Swiss peynir", "Mantar", "Karamelize soğan"],
-  28: ["Dana köfte", "Cheddar", "Acı sos", "Jalapeno"],
-  29: ["Dana köfte", "Avokado", "Marul", "Domates"], 30: ["Smashed köfte", "Cheddar", "Soğan", "Özel sos"],
-  31: ["Patates", "Cheddar sos", "Taze soğan"], 32: ["Patates", "Baharat karışımı", "Tuz"],
-  33: ["Tavuk", "Çıtır kaplama", "Ranch sos"], 34: ["Jalapeno", "Krem peynir", "Galeta unu"],
-  35: ["Makarna", "Cheddar", "Galeta unu"], 36: ["Yeşillik", "Domates", "Zeytin", "Peynir"],
-  37: ["Karbonatlı su", "Kola aroması"], 38: ["Karbonatlı su", "Portakal aroması"],
-  39: ["Karbonatlı su", "Limon aroması"], 40: ["Kahve", "Süt", "Buz"],
-  41: ["Süt", "Vanilya", "Dondurma"], 42: ["Portakal"],
-};
-
 const sayi = (deger, varsayilan = 0) => {
   const n = Number(deger);
   return Number.isFinite(n) ? n : varsayilan;
 };
-
-const GRAMAJ_VARSAYILANLARI = {
-  "Burgerler": { etiket: "Köfte gramajı", birim: "gr", artisOrani: 0.25, miktarYuvarlama: 25, fiyatArtisOrani: 0.20, fiyatYuvarlama: 5, maxAdim: 3 },
-  "Yan Lezzetler": { etiket: "Porsiyon gramajı", birim: "gr", artisOrani: 0.25, miktarYuvarlama: 25, fiyatArtisOrani: 0.40, fiyatYuvarlama: 5, maxAdim: 3 },
-  "İçecekler": { etiket: "İçecek hacmi", birim: "ml", artisOrani: 0.25, miktarYuvarlama: 25, fiyatArtisOrani: 0.25, fiyatYuvarlama: 5, maxAdim: 3 },
-};
-
-const enYakinaYuvarla = (deger, adim) => Math.max(adim, Math.round(deger / adim) * adim);
-
-function varsayilanGramajOpsiyonu(kategori, temelMiktar, fiyat) {
-  const kural = GRAMAJ_VARSAYILANLARI[kategori];
-  const temel = sayi(temelMiktar);
-  if (!kural || temel <= 0) return null;
-  return {
-    goster: true,
-    aktif: true,
-    etiket: kural.etiket,
-    birim: kural.birim,
-    artisMiktari: enYakinaYuvarla(temel * kural.artisOrani, kural.miktarYuvarlama),
-    maxAdim: kural.maxAdim,
-    fiyatArtisi: enYakinaYuvarla(sayi(fiyat) * kural.fiyatArtisOrani, kural.fiyatYuvarlama),
-  };
-}
 
 function gramajOpsiyonunuDogrula(ham, temelMiktar) {
   if (ham == null) return null;
@@ -454,30 +343,6 @@ export async function adminTablolariHazirla(isletmeId) {
     CREATE UNIQUE INDEX IF NOT EXISTS sistem_ayarlari_isletme_anahtar
       ON sistem_ayarlari(isletme_id,anahtar);
   `);
-  for (const [ad, gorsel, sira] of BASLANGIC_KATEGORILERI) {
-    await pool.query(
-      `INSERT INTO kategoriler (isletme_id,ad,gorsel,sira) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (isletme_id,ad) DO UPDATE SET gorsel=COALESCE(kategoriler.gorsel,EXCLUDED.gorsel)`,
-      [tenantId, ad, gorsel, sira]
-    );
-  }
-  for (const [kod, etiket, baslik, aciklama, buton, butonTipi, gorsel, baslangicSaat, bitisSaat, indirimYuzde, gecerliKategoriler, kampanyaTipi, sira] of BASLANGIC_KAMPANYALARI) {
-    await pool.query(
-      `INSERT INTO kampanyalar (isletme_id,kod,etiket,baslik,aciklama,buton,buton_tipi,gorsel,aktif,baslangic_saat,bitis_saat,indirim_yuzde,gecerli_kategoriler,kampanya_tipi,sira)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12::jsonb,$13,$14) ON CONFLICT (isletme_id,kod) DO NOTHING`,
-      [tenantId, kod, etiket, baslik, aciklama, buton, butonTipi, gorsel, baslangicSaat, bitisSaat, indirimYuzde, JSON.stringify(gecerliKategoriler), kampanyaTipi, sira]
-    );
-  }
-  // Manuel katalog v2: eski demo/manuel katalog bir defa arşivlenir. Fiziksel
-  // silme yerine arşivleme, geçmiş sipariş ve ödül referanslarını korur.
-  const katalogSifirlandi = await pool.query("SELECT 1 FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='manuel_katalog_v2'", [tenantId]);
-  if (!katalogSifirlandi.rows.length) {
-    await pool.query("UPDATE urunler SET aktif=false,arsivli=true,guncelleme=NOW() WHERE isletme_id=$1 AND arsivli=false", [tenantId]);
-    await pool.query(
-      "INSERT INTO sistem_ayarlari (isletme_id,anahtar,deger) VALUES ($1,'manuel_katalog_v2',$2::jsonb) ON CONFLICT (isletme_id,anahtar) DO NOTHING",
-      [tenantId, JSON.stringify({ tarih: new Date().toISOString(), aciklama: "Katalog manuel yönetime geçirildi" })]
-    );
-  }
   const onerilerKuruldu = await pool.query("SELECT 1 FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='upsell_onerileri_v1'", [tenantId]);
   if (!onerilerKuruldu.rows.length) {
     await pool.query(`
@@ -516,25 +381,6 @@ export async function adminTablolariHazirla(isletmeId) {
     ON CONFLICT (isletme_id,ad) DO NOTHING
   `, [tenantId]);
 
-  // Demo başlangıç verileri yalnızca bir defa eklenir. Sonraki başlangıçlarda
-  // adminin eklediği/değiştirdiği kayıtlar korunur ve veriler çoğalmaz.
-  const demoKuruldu = await pool.query("SELECT 1 FROM sistem_ayarlari WHERE isletme_id=$1 AND anahtar='demo_seed_v1'", [tenantId]);
-  if (!demoKuruldu.rows.length) {
-    const personelVar = await pool.query("SELECT 1 FROM personeller WHERE isletme_id=$1 LIMIT 1", [tenantId]);
-    if (!personelVar.rows.length) {
-      await pool.query(`
-        INSERT INTO personeller (isletme_id,ad,soyad,rol,email,telefon,saatlik_ucret) VALUES
-          ($1,'Ayşe','Yılmaz','Mutfak','ayse@burgerplus.demo','0555 100 10 10',180),
-          ($1,'Mehmet','Demir','Salon','mehmet@burgerplus.demo','0555 200 20 20',170),
-          ($1,'Zeynep','Kaya','Kasiyer','zeynep@burgerplus.demo','0555 300 30 30',175)
-        ON CONFLICT (isletme_id,lower(email)) DO NOTHING
-      `, [tenantId]);
-    }
-    await pool.query(
-      "INSERT INTO sistem_ayarlari (isletme_id,anahtar,deger) VALUES ($1,'demo_seed_v1',$2::jsonb) ON CONFLICT (isletme_id,anahtar) DO NOTHING",
-      [tenantId, JSON.stringify({ tarih: new Date().toISOString() })]
-    );
-  }
 }
 
 function ceviriAlanlari(ceviriler) {

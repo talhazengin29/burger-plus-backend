@@ -65,12 +65,24 @@ export async function isletmeTablosunuHazirla() {
       olusturma TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  const sonuc = await pool.query(
-    `INSERT INTO isletmeler (slug,ad,konsept)
-     VALUES ('burger-plus','Burger Plus','burger')
-     ON CONFLICT (slug) DO UPDATE SET slug=EXCLUDED.slug
-     RETURNING *`
-  );
+  let sonuc = await pool.query("SELECT * FROM isletmeler ORDER BY id LIMIT 1");
+  if (!sonuc.rows.length) {
+    const slug = String(process.env.ILK_ISLETME_SLUG || "").trim().toLowerCase();
+    const ad = String(process.env.ILK_ISLETME_ADI || "").trim();
+    const konsept = String(process.env.ILK_ISLETME_KONSEPTI || "").trim().toLowerCase();
+    if (!SLUG_DESENI.test(slug) || slug.length > 80 || ad.length < 2 || !KONSEPTLER[konsept]) {
+      throw new Error(
+        "Veritabaninda isletme yok. ILK_ISLETME_SLUG, ILK_ISLETME_ADI ve ILK_ISLETME_KONSEPTI ortam degiskenlerini tanimlayin."
+      );
+    }
+    sonuc = await pool.query(
+      `INSERT INTO isletmeler (slug,ad,konsept)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (slug) DO UPDATE SET ad=EXCLUDED.ad,konsept=EXCLUDED.konsept
+       RETURNING *`,
+      [slug, ad.slice(0, 160), konsept]
+    );
+  }
   const varsayilanId = Number(sonuc.rows[0].id);
   // Eski kurulumda tablolar zaten varsa, tenant kullanan başlangıç migration'ları
   // çalışmadan önce sütunu güvenli biçimde hazırla. Tam FK/NOT NULL/index adımı
@@ -84,7 +96,8 @@ export async function isletmeTablosunuHazirla() {
   return isletmeDonustur(sonuc.rows[0]);
 }
 
-export async function isletmeMigrationunuCalistir() {
+export async function isletmeMigrationunuCalistir(varsayilanIsletmeId) {
+  const varsayilanId = isletmeIdDogrula(varsayilanIsletmeId);
   const baglanti = await pool.connect();
   try {
     await baglanti.query("BEGIN");
@@ -101,14 +114,6 @@ export async function isletmeMigrationunuCalistir() {
         olusturma TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-    const varsayilan = await baglanti.query(
-      `INSERT INTO isletmeler (slug,ad,konsept)
-       VALUES ('burger-plus','Burger Plus','burger')
-       ON CONFLICT (slug) DO UPDATE SET slug=EXCLUDED.slug
-       RETURNING id`
-    );
-    const varsayilanId = Number(varsayilan.rows[0].id);
-
     for (const tablo of TENANT_TABLOLARI) {
       const varMi = await baglanti.query("SELECT to_regclass($1) AS tablo", [`public.${tablo}`]);
       if (!varMi.rows[0]?.tablo) throw new Error(`Tenant migration tablosu bulunamadı: ${tablo}`);
@@ -194,8 +199,8 @@ export async function isletmeMigrationunuGeriAl() {
   try {
     await baglanti.query("BEGIN");
     await baglanti.query("SELECT pg_advisory_xact_lock(hashtext('burger_plus_tenant_v1_rollback'))");
-    const digerIsletmeler = await baglanti.query("SELECT COUNT(*)::int AS adet FROM isletmeler WHERE slug<>'burger-plus'");
-    if (Number(digerIsletmeler.rows[0].adet) > 0) {
+    const isletmeSayisi = await baglanti.query("SELECT COUNT(*)::int AS adet FROM isletmeler");
+    if (Number(isletmeSayisi.rows[0].adet) > 1) {
       throw new Error("Birden fazla işletme varken tenant migration'ı kayıpsız geri alınamaz.");
     }
 
@@ -272,13 +277,6 @@ export async function isletmeOlustur(veri = {}, transactionHazirligi = null) {
       [slug, ad, konsept, logoUrl, JSON.stringify(temizTema), veri.aktif !== false]
     );
     const isletme = isletmeDonustur(sonuc.rows[0]);
-    for (const [sira, kategori] of KONSEPTLER[konsept].kategoriler.entries()) {
-      await baglanti.query(
-        `INSERT INTO kategoriler (isletme_id,ad,sira,aktif)
-         VALUES ($1,$2,$3,true) ON CONFLICT (isletme_id,ad) DO NOTHING`,
-        [isletme.id, kategori, (sira + 1) * 10]
-      );
-    }
     if (transactionHazirligi != null) {
       if (typeof transactionHazirligi !== "function") throw new Error("İşletme transaction hazırlığı geçersiz.");
       await transactionHazirligi(baglanti, isletme);

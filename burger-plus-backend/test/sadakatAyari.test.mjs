@@ -4,12 +4,12 @@ import { sadakatAyariniGetir } from "../sadakatDb.js";
 
 const veritabani = (deger) => ({ query: async () => ({ rows: deger == null ? [] : [{ deger }] }) });
 
-test("sadakat ayari bulunamazsa guvenli varsayilanlar doner", async () => {
+test("sadakat ayari bulunamazsa sistem pasif ve veri uretmeden doner", async () => {
   const ayar = await sadakatAyariniGetir(3, veritabani(null));
-  assert.equal(ayar.aktif, true);
+  assert.equal(ayar.aktif, false);
   assert.equal(ayar.hedefAdet, 5);
-  assert.equal(ayar.kategori, "Burgerler");
-  assert.equal(ayar.odulKodu, "ye-kazan-burger");
+  assert.equal(ayar.kategori, "");
+  assert.equal(ayar.odulKodu, "ye-kazan-3");
 });
 
 test("isletmeye ozel damga karti ayari donusturulur", async () => {

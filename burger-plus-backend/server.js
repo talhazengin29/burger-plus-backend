@@ -117,7 +117,7 @@ import {
   abonelikleriGetir, abonelikOlustur, abonelikGuncelle, gelirRaporunuGetir,
   isletmeAdminleriniGetir, isletmeAdminHesabiniAyarla, isletmeAdmininiGuncelle, isletmeAdmininiSil,
 } from "./superAdminDb.js";
-import { sablonuGetir, slugOlustur } from "./sablonlar.js";
+import { slugOlustur } from "./slug.js";
 import {
   masaPlaniOlustur,
   masaZekasiTablolariniHazirla,
@@ -1045,12 +1045,6 @@ app.post("/api/super/cikis", superAdmin, (req, res) => {
   res.json({ basarili: true });
 });
 
-app.get("/api/super/sablonlar/:konsept", superAdmin, guvenli(async (req) => {
-  const konsept = String(req.params.konsept || "").trim().toLowerCase();
-  const sablon = sablonuGetir(konsept);
-  if (!sablon) throw new Error("Konsept yalnızca burger, cafe veya pizza olabilir.");
-  return { konsept, sablon };
-}));
 app.get("/api/super/slug-kontrol", superAdmin, guvenli(async (req) => {
   const sonuc = await slugMusaitlikDurumu(req.query.slug);
   return { ...sonuc, uretilenSlug: slugOlustur(req.query.slug) };
@@ -1865,7 +1859,7 @@ isletmeTablosunuHazirla()
   .then(() => giderTablolariniHazirla(pool))
   .then(() => receteTablolariniHazirla(pool))
   .then(() => masaZekasiTablolariniHazirla(pool))
-  .then(() => isletmeMigrationunuCalistir())
+  .then(() => isletmeMigrationunuCalistir(varsayilanIsletmeId))
   .then(() => superAdminTablolariniHazirla())
   .then(() => basvuruTablosunuHazirla(pool))
   .then(() => ilkSuperAdminiHazirla())
