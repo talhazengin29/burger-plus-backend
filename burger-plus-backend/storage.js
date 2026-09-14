@@ -119,6 +119,18 @@ export async function gorselYukle(buffer, bildirilenMime = "") {
   return nesneYukle(guvenliGorsel, nesneYolu, { mime: "image/webp" }, 5 * 1024 * 1024, "İşlenen görsel en fazla 5 MB olabilir.");
 }
 
+export async function temaArkaPlaniYukle(buffer, isletmeId, bildirilenMime = "") {
+  if (!Buffer.isBuffer(buffer)) throw new Error("Gecerli bir arka plan gorseli gonderilmelidir.");
+  if (buffer.length > 5 * 1024 * 1024) throw new Error("Arka plan gorseli en fazla 5 MB olabilir.");
+  const gorselTuru = dosyaTurunuBul(buffer, GORSEL_TURLERI, bildirilenMime);
+  if (!gorselTuru) throw new Error("Arka plan PNG, JPG/JPEG, WebP, GIF, AVIF veya BMP formatinda olmalidir.");
+  const tenant = Number(isletmeId);
+  if (!Number.isSafeInteger(tenant) || tenant < 1) throw new Error("Arka plan isletmesi dogrulanamadi.");
+  const guvenliGorsel = await rasterGorseliGuvenliWebpYap(buffer, "Arka plan gorseli");
+  const nesneYolu = `tema-arka-planlari/${tenant}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.webp`;
+  return nesneYukle(guvenliGorsel, nesneYolu, { mime: "image/webp" }, 5 * 1024 * 1024, "Islenen arka plan en fazla 5 MB olabilir.");
+}
+
 export async function sikayetGorseliYukle(buffer, isletmeId, kullaniciId, bildirilenMime) {
   if (!Buffer.isBuffer(buffer)) throw new Error("Geçerli bir görsel dosyası gönderilmelidir.");
   const izinliTurler = GORSEL_TURLERI.filter((tur) => ["image/png", "image/jpeg", "image/webp"].includes(tur.mime));

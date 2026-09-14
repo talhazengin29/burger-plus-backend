@@ -155,6 +155,22 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
     }
   }
 
+  let arkaPlanGorseli = mevcutTema.arkaPlanGorseli || null;
+  if (girdi.arkaPlanGorseli !== undefined) {
+    const deger = String(girdi.arkaPlanGorseli || "").trim().slice(0, 1000);
+    if (!deger) {
+      arkaPlanGorseli = null;
+    } else {
+      try {
+        const url = new URL(deger);
+        if (!["http:", "https:"].includes(url.protocol)) throw new Error();
+      } catch {
+        throw new Error("Tema arka plani gecerli bir http/https adresi olmalidir.");
+      }
+      arkaPlanGorseli = deger;
+    }
+  }
+
   const logoOlcegiHam = girdi.logoOlcegi == null ? (mevcutTema.logoOlcegi ?? 100) : girdi.logoOlcegi;
   const logoOlcegi = Number(logoOlcegiHam);
   if (!Number.isFinite(logoOlcegi) || logoOlcegi < 60 || logoOlcegi > 180) {
@@ -189,6 +205,7 @@ export function temaGirdisiniTemizle(girdi = {}, mevcutIsletme = {}) {
       logoKonumX: Math.round(logoKonumX),
       logoKonumY: Math.round(logoKonumY),
       ...(tumuGorseli ? { tumuGorseli } : {}),
+      ...(arkaPlanGorseli ? { arkaPlanGorseli } : {}),
     },
   };
 }
@@ -210,6 +227,7 @@ export function temaCoz(isletme) {
     ozelPalet: ozel.ozelPalet === true,
     gorunum: ozel.gorunum === "acik" ? "acik" : "koyu",
     tumuGorseli: ozel.tumuGorseli || null,
+    arkaPlanGorseli: ozel.arkaPlanGorseli || null,
     logoOlcegi: Math.min(180, Math.max(60, Number(ozel.logoOlcegi) || 100)),
     logoKonumX: Math.min(80, Math.max(-80, Number(ozel.logoKonumX) || 0)),
     logoKonumY: Math.min(30, Math.max(-30, Number(ozel.logoKonumY) || 0)),

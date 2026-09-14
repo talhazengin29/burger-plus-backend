@@ -51,6 +51,27 @@ test("geçersiz uygulama görünümü reddedilir", () => {
   );
 });
 
+test("isletmeye ozel arka plan URL'si saklanir, cozulur ve kaldirilabilir", () => {
+  const url = "https://cdn.example.com/restoran/arka-plan.webp";
+  const eklenen = temaGirdisiniTemizle({ arkaPlanGorseli: url }, { konsept: "burger", tema: {} });
+  assert.equal(eklenen.tema.arkaPlanGorseli, url);
+  assert.equal(temaCoz({ konsept: "burger", tema: eklenen.tema }).arkaPlanGorseli, url);
+
+  const kaldirilan = temaGirdisiniTemizle(
+    { arkaPlanGorseli: null },
+    { konsept: "burger", tema: eklenen.tema },
+  );
+  assert.equal(kaldirilan.tema.arkaPlanGorseli, undefined);
+  assert.equal(temaCoz({ konsept: "burger", tema: kaldirilan.tema }).arkaPlanGorseli, null);
+});
+
+test("guvensiz tema arka plan protokolleri reddedilir", () => {
+  assert.throws(
+    () => temaGirdisiniTemizle({ arkaPlanGorseli: "javascript:alert(1)" }, { konsept: "burger", tema: {} }),
+    /arka plani/,
+  );
+});
+
 test("müşteri temasının hazır İngilizce metinleri API temasına eklenir", () => {
   const tema = temaCoz({
     konsept: "burger",

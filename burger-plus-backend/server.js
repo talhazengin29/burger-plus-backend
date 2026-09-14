@@ -79,7 +79,7 @@ import {
 } from "./adminDb.js";
 import { ceviriYapilandirmasi } from "./ceviri.js";
 import {
-  gorselYukle, logoYukle, storageDosyasiniSil,
+  gorselYukle, logoYukle, temaArkaPlaniYukle, storageDosyasiniSil,
   sikayetGorseliYukle, sikayetGorseliKullaniciyaAitMi,
   giderBelgesiYukle, giderBelgesiIsletmeyeAitMi,
 } from "./storage.js";
@@ -1282,6 +1282,39 @@ app.post(
     return yanit;
   })
 );
+app.post(
+  "/api/admin/tema-arka-plani",
+  dosyaYuklemeLimiti,
+  admin,
+  express.raw({ type: "image/*", limit: "5mb" }),
+  guvenli(async (req) => {
+    const eskiArkaPlan = req.isletme.tema?.arkaPlanGorseli || null;
+    const yeniArkaPlan = await temaArkaPlaniYukle(req.body, req.isletme.id, req.headers["content-type"]);
+    let isletme;
+    try {
+      isletme = await isletmeTemasiniGuncelle(req.isletme.id, { arkaPlanGorseli: yeniArkaPlan });
+    } catch (hata) {
+      await storageDosyasiniSil(yeniArkaPlan).catch(() => {});
+      throw hata;
+    }
+    if (eskiArkaPlan && eskiArkaPlan !== yeniArkaPlan) {
+      await storageDosyasiniSil(eskiArkaPlan).catch((hata) => console.error("Eski tema arka plani silinemedi:", hata.message));
+    }
+    const yanit = temaliIsletmeYaniti(isletme);
+    io.to(oda(req.isletme.id, "genel")).emit("tema-guncellendi", yanit);
+    return yanit;
+  }),
+);
+app.delete("/api/admin/tema-arka-plani", admin, guvenli(async (req) => {
+  const eskiArkaPlan = req.isletme.tema?.arkaPlanGorseli || null;
+  const isletme = await isletmeTemasiniGuncelle(req.isletme.id, { arkaPlanGorseli: null });
+  if (eskiArkaPlan) {
+    await storageDosyasiniSil(eskiArkaPlan).catch((hata) => console.error("Tema arka plani silinemedi:", hata.message));
+  }
+  const yanit = temaliIsletmeYaniti(isletme);
+  io.to(oda(req.isletme.id, "genel")).emit("tema-guncellendi", yanit);
+  return yanit;
+}));
 app.get("/api/admin/urunler", admin, guvenli(async (req) => ({ urunler: await urunleriGetir(req.isletme.id, { tumu: true, stokDetayi: true }) })));
 app.get("/api/admin/recete-stok", admin, guvenli(async (req) => receteStokMerkeziniGetir(req.isletme.id, pool)));
 app.post("/api/admin/hammaddeler", admin, guvenli(async (req) => {
