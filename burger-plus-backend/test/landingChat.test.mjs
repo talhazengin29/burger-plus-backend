@@ -45,9 +45,10 @@ test("hazır cevap bulunamazsa Gemini structured output kullanılır", async () 
   }
 });
 
-test("hazir ve AI yanitlarinda yalnizca Menule markasi kullanilir", async () => {
+test("hazir ve AI yanitlarinda yalnizca MasanPOS markasi kullanilir", async () => {
   const karsilama = hazirLandingCevabi("merhaba");
-  assert.match(karsilama, /Menüle/);
+  assert.match(karsilama, /MasanPOS/);
+  assert.doesNotMatch(karsilama, /men[üu]le/i);
   assert.doesNotMatch(karsilama, /orq\s*restro/i);
 
   const oncekiAnahtar = process.env.GEMINI_API_KEY;
@@ -55,9 +56,10 @@ test("hazir ve AI yanitlarinda yalnizca Menule markasi kullanilir", async () => 
   try {
     const sonuc = await landingChatYaniti({ mesaj: "Bana nasil yardim edebilirsiniz?", gecmis: [] }, async () => ({
       ok: true,
-      json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ answer: "orQRestro restoraninizi yonetmenize yardimci olur." }) }] } }] }),
+      json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ answer: "Menüle ve orQRestro restoranınızı yönetmenize yardımcı olur." }) }] } }] }),
     }));
-    assert.match(sonuc.cevap, /Menüle/);
+    assert.match(sonuc.cevap, /MasanPOS/);
+    assert.doesNotMatch(sonuc.cevap, /men[üu]le/i);
     assert.doesNotMatch(sonuc.cevap, /orq\s*restro/i);
   } finally {
     if (oncekiAnahtar === undefined) delete process.env.GEMINI_API_KEY;
