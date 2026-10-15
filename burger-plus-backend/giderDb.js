@@ -1,6 +1,12 @@
 const GIDER_DURUMLARI = new Set(["onay_bekliyor", "onaylandi", "reddedildi", "iptal"]);
 const ODEME_YONTEMLERI = new Set(["nakit", "banka", "kredi_karti", "vadeli", "isletme_sahibi"]);
 const TEKRAR_PERIYOTLARI = new Set(["haftalik", "aylik", "yillik"]);
+// Tahsilat sayilan odeme saglayicilari. 'simulasyon' gercek para degildir;
+// 'odul' puanla alinan hediyenin siparise donusmesidir ve tutari her zaman 0'dir
+// (bkz. sadakatDb.js#kullaniciOdulunuSipariseDonustur). Ikisi de ciroya, siparis
+// sayisina ve ortalama sepete girmemeli. Sabit bir SQL parcasidir; istemci
+// girdisi icermedigi icin sorgulara dogrudan gomulebilir.
+const TAHSILAT_FILTRESI = "saglayici NOT IN ('simulasyon','odul')";
 const VARSAYILAN_KATEGORILER = [
   "Hammadde ve stok", "Personel maaşları", "Kira", "Elektrik, su ve doğalgaz",
   "Paketleme", "Komisyonlar", "Kurye ve nakliye", "Bakım ve onarım",
@@ -415,15 +421,15 @@ export async function finansRaporunuGetir(isletmeId, pool, filtre = {}) {
   const { baslangic, bitis, butceAyi } = raporTarihleriniDogrula(filtre);
   const [gelir, gider, gunluk, aylik, kategori, butce, odeme] = await Promise.all([
     pool.query(`SELECT COALESCE(SUM(tutar),0) ciro,COUNT(*)::int siparis,COALESCE(AVG(tutar),0) ortalama_sepet
-      FROM odeme_islemleri WHERE isletme_id=$1 AND durum='basarili' AND COALESCE(basarili_at,olusturma)::date BETWEEN $2::date AND $3::date`, [id, baslangic, bitis]),
+      FROM odeme_islemleri WHERE isletme_id=$1 AND durum='basarili' AND ${TAHSILAT_FILTRESI} AND COALESCE(basarili_at,olusturma)::date BETWEEN $2::date AND $3::date`, [id, baslangic, bitis]),
     pool.query(`SELECT COALESCE(SUM(tutar),0) gider,COALESCE(SUM(kdv_tutari),0) kdv,COUNT(*)::int kayit
       FROM giderler WHERE isletme_id=$1 AND durum='onaylandi' AND gider_tarihi BETWEEN $2::date AND $3::date`, [id, baslangic, bitis]),
     pool.query(`WITH gunler AS (SELECT generate_series($2::date,$3::date,'1 day')::date gun),
-      gelir AS (SELECT COALESCE(basarili_at,olusturma)::date gun,SUM(tutar) tutar FROM odeme_islemleri WHERE isletme_id=$1 AND durum='basarili' AND COALESCE(basarili_at,olusturma)::date BETWEEN $2::date AND $3::date GROUP BY 1),
+      gelir AS (SELECT COALESCE(basarili_at,olusturma)::date gun,SUM(tutar) tutar FROM odeme_islemleri WHERE isletme_id=$1 AND durum='basarili' AND ${TAHSILAT_FILTRESI} AND COALESCE(basarili_at,olusturma)::date BETWEEN $2::date AND $3::date GROUP BY 1),
       gider AS (SELECT gider_tarihi gun,SUM(tutar) tutar FROM giderler WHERE isletme_id=$1 AND durum='onaylandi' AND gider_tarihi BETWEEN $2::date AND $3::date GROUP BY 1)
       SELECT g.gun,COALESCE(ge.tutar,0) gelir,COALESCE(gi.tutar,0) gider FROM gunler g LEFT JOIN gelir ge USING(gun) LEFT JOIN gider gi USING(gun) ORDER BY g.gun`, [id, baslangic, bitis]),
     pool.query(`WITH aylar AS (SELECT generate_series(date_trunc('month',$2::date)-INTERVAL '5 months',date_trunc('month',$2::date),'1 month')::date ay),
-      gelir AS (SELECT date_trunc('month',COALESCE(basarili_at,olusturma))::date ay,SUM(tutar) tutar FROM odeme_islemleri WHERE isletme_id=$1 AND durum='basarili' AND COALESCE(basarili_at,olusturma)>=date_trunc('month',$2::date)-INTERVAL '5 months' AND COALESCE(basarili_at,olusturma)<date_trunc('month',$2::date)+INTERVAL '1 month' GROUP BY 1),
+      gelir AS (SELECT date_trunc('month',COALESCE(basarili_at,olusturma))::date ay,SUM(tutar) tutar FROM odeme_islemleri WHERE isletme_id=$1 AND durum='basarili' AND ${TAHSILAT_FILTRESI} AND COALESCE(basarili_at,olusturma)>=date_trunc('month',$2::date)-INTERVAL '5 months' AND COALESCE(basarili_at,olusturma)<date_trunc('month',$2::date)+INTERVAL '1 month' GROUP BY 1),
       gider AS (SELECT date_trunc('month',gider_tarihi)::date ay,SUM(tutar) tutar FROM giderler WHERE isletme_id=$1 AND durum='onaylandi' AND gider_tarihi>=date_trunc('month',$2::date)-INTERVAL '5 months' AND gider_tarihi<date_trunc('month',$2::date)+INTERVAL '1 month' GROUP BY 1)
       SELECT a.ay,COALESCE(ge.tutar,0) gelir,COALESCE(gi.tutar,0) gider FROM aylar a LEFT JOIN gelir ge USING(ay) LEFT JOIN gider gi USING(ay) ORDER BY a.ay`, [id, bitis]),
     pool.query(`SELECT k.id,k.ad,k.renk,COALESCE(SUM(g.tutar),0) tutar FROM gider_kategorileri k LEFT JOIN giderler g ON g.isletme_id=k.isletme_id AND g.kategori_id=k.id AND g.durum='onaylandi' AND g.gider_tarihi BETWEEN $2::date AND $3::date WHERE k.isletme_id=$1 GROUP BY k.id ORDER BY tutar DESC,k.ad`, [id, baslangic, bitis]),
@@ -431,7 +437,7 @@ export async function finansRaporunuGetir(isletmeId, pool, filtre = {}) {
       FROM gider_kategorileri k LEFT JOIN gider_butceleri b ON b.isletme_id=k.isletme_id AND b.kategori_id=k.id AND b.donem=$2::date
       LEFT JOIN giderler g ON g.isletme_id=k.isletme_id AND g.kategori_id=k.id AND g.durum='onaylandi' AND g.gider_tarihi>= $2::date AND g.gider_tarihi<($2::date+INTERVAL '1 month')
       WHERE k.isletme_id=$1 AND k.aktif=TRUE GROUP BY k.id,b.tutar ORDER BY k.ad`, [id, butceAyi]),
-    pool.query(`SELECT yontem,COUNT(*)::int adet,COALESCE(SUM(tutar),0) tutar FROM odeme_islemleri WHERE isletme_id=$1 AND durum='basarili' AND COALESCE(basarili_at,olusturma)::date BETWEEN $2::date AND $3::date GROUP BY yontem ORDER BY tutar DESC`, [id, baslangic, bitis]),
+    pool.query(`SELECT saglayici,COUNT(*)::int adet,COALESCE(SUM(tutar),0) tutar FROM odeme_islemleri WHERE isletme_id=$1 AND durum='basarili' AND ${TAHSILAT_FILTRESI} AND COALESCE(basarili_at,olusturma)::date BETWEEN $2::date AND $3::date GROUP BY saglayici ORDER BY tutar DESC`, [id, baslangic, bitis]),
   ]);
   const ciro = Number(gelir.rows[0].ciro); const toplamGider = Number(gider.rows[0].gider); const net = ciro - toplamGider;
   const sayi = (deger) => Number(deger || 0);
@@ -442,6 +448,6 @@ export async function finansRaporunuGetir(isletmeId, pool, filtre = {}) {
     aylik: aylik.rows.map((r) => ({ ay: r.ay, gelir: sayi(r.gelir), gider: sayi(r.gider) })),
     kategoriler: kategori.rows.map((r) => ({ id: Number(r.id), ad: r.ad, renk: r.renk, tutar: sayi(r.tutar) })),
     butceler: butce.rows.map((r) => { const plan = sayi(r.butce); const gerceklesen = sayi(r.gerceklesen); return { kategoriId: Number(r.id), ad: r.ad, renk: r.renk, butce: plan, gerceklesen, kalan: plan - gerceklesen, kullanim: plan ? Number((gerceklesen / plan * 100).toFixed(1)) : 0 }; }),
-    odemeYontemleri: odeme.rows.map((r) => ({ yontem: r.yontem, adet: Number(r.adet), tutar: sayi(r.tutar) })),
+    odemeYontemleri: odeme.rows.map((r) => ({ saglayici: r.saglayici, adet: Number(r.adet), tutar: sayi(r.tutar) })),
   };
 }
